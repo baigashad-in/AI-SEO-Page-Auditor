@@ -1,0 +1,33 @@
+{
+  "name": "ai-page-auditor",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Audits whether AI search and fetch tools can read a page, and how that ties to search visibility. Built on TinyFish Search, Fetch, Browser and Agent.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "audit": "tsx scripts/audit-cli.ts",
+    "demo": "tsx scripts/demo.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cheerio": "1.2.0",
+    "next": "16.4.0",
+    "playwright-core": "1.63.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tsx": "4.23.15",
+    "typescript": "^5.7.0",
+    "vitest": "5.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
