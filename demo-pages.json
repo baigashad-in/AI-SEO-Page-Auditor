@@ -1,0 +1,7 @@
+[
+  { "url": "https://en.wikipedia.org/wiki/Search_engine_optimization", "query": "what is search engine optimization", "why": "Server-rendered reference page: expect high readability" },
+  { "url": "https://react.dev/learn", "query": "learn react", "why": "Docs site built with a JS framework but prerendered" },
+  { "url": "https://www.tinyfish.ai/", "query": "web agent api", "why": "Product homepage: check positioning vs the query" },
+  { "url": "https://docs.tinyfish.ai/fetch-api", "query": "fetch api for ai agents", "why": "Developer docs page" },
+  { "url": "https://www.reddit.com/r/SEO/", "query": "seo subreddit", "why": "Heavily protected site: expect bot blocking findings" }
+]
