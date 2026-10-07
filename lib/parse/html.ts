@@ -63,6 +63,17 @@ export function htmlFacts(html: string): HtmlFacts {
 
   const meta = (sel: string) => clean($(sel).first().attr("content"));
 
+  // Read every <head> value now: the head is removed further down to measure body text.
+  const metaDescription = meta('meta[name="description" i]');
+  const robotsValues = [meta('meta[name="robots" i]'), meta('meta[name="googlebot" i]')].filter(Boolean);
+  const metaRobots = robotsValues.length ? robotsValues.join(", ") : null;
+  const og = {
+    title: meta('meta[property="og:title"]'),
+    description: meta('meta[property="og:description"]'),
+    type: meta('meta[property="og:type"]'),
+    image: meta('meta[property="og:image"]'),
+  };
+
   // JSON-LD before scripts are removed
   const ld: JsonLdSummary = { blocks: 0, types: [], parseErrors: 0, sample: null };
   const types = new Set<string>();
@@ -111,18 +122,13 @@ export function htmlFacts(html: string): HtmlFacts {
 
   return {
     title,
-    metaDescription: meta('meta[name="description"]'),
+    metaDescription,
     canonical,
-    metaRobots: meta('meta[name="robots"]'),
+    metaRobots,
     htmlLang,
     h1: headings.filter((h) => h.level === 1).map((h) => h.text),
     headings: headings.slice(0, 80),
-    og: {
-      title: meta('meta[property="og:title"]'),
-      description: meta('meta[property="og:description"]'),
-      type: meta('meta[property="og:type"]'),
-      image: meta('meta[property="og:image"]'),
-    },
+    og,
     jsonLd: ld,
     hreflangCount,
     words: wordCount(bodyText),

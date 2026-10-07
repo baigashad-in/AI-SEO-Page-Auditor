@@ -40,7 +40,7 @@ export function wordCount(text: string): number {
  * directly adjacent in the original text, inside one phrase, so "start a free trial" yields
  * "free trial" but not "start free".
  */
-export function termCounts(text: string, maxTerms = 250): Record<string, number> {
+export function termCounts(text: string, maxTerms = 250, minBigramCount = 2): Record<string, number> {
   const counts = new Map<string, number>();
   for (const phrase of text.split(/[.!?;:,()[\]{}|\n\r"]+/)) {
     const raw = tokenize(phrase);
@@ -58,10 +58,15 @@ export function termCounts(text: string, maxTerms = 250): Record<string, number>
   }
   return Object.fromEntries(
     [...counts.entries()]
-      .filter(([k, v]) => v >= (k.includes(" ") ? 2 : 1))
+      .filter(([k, v]) => v >= (k.includes(" ") ? minBigramCount : 1))
       .sort((a, b) => b[1] - a[1])
       .slice(0, maxTerms),
   );
+}
+
+/** Every stemmed content word and adjacent word pair in the text, at any count. */
+export function phraseSet(text: string): Set<string> {
+  return new Set(Object.keys(termCounts(text, Number.MAX_SAFE_INTEGER, 1)));
 }
 
 export function queryTerms(query: string): string[] {

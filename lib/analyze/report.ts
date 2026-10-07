@@ -185,7 +185,8 @@ export function buildReport(b: StageBundle, input: { url: string; query?: string
   const scores = computeScores(b);
   const findings = buildFindings(b);
   const doToday = findings
-    .filter((f) => f.severity !== "info" && (f.severity === "critical" || f.severity === "high" || f.fix.effort !== "days"))
+    // Only things worth doing today: low and info findings stay in the full list.
+    .filter((f) => f.severity === "critical" || f.severity === "high" || (f.severity === "medium" && f.fix.effort !== "days"))
     .slice(0, 5)
     .map((f) => f.id);
   const calls: CallLog[] = [...(b.fetch?.calls ?? []), ...(b.browser?.calls ?? []), ...(b.search?.calls ?? []), ...(b.agent?.calls ?? [])];

@@ -47,6 +47,7 @@ export function reportToMarkdown(r: AuditReport): string {
     "",
     "## Do today",
     "",
+    ...(r.doToday.length ? [] : ["Nothing urgent. The remaining findings are low priority polish."]),
     ...r.doToday.map((id, i) => {
       const f = byId.get(id)!;
       return `${i + 1}. **${f.title}** (${f.severity}, ${f.fix.effort}): ${f.fix.summary}`;

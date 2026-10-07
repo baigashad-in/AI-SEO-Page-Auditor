@@ -14,6 +14,7 @@ export function markdownToPlain(md: string): string {
     .replace(/^\s*([-*+]|\d+[.)])\s+/gm, "")
     .replace(/^\s*>\s?/gm, "")
     .replace(/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/gm, " ")
+    .replace(/:?-{3,}:?/g, " ") // separator runs left inside flattened tables or rules
     .replace(/\|/g, " ")
     .replace(/[*_`~]+/g, "")
     .replace(/[ \t]+/g, " ");

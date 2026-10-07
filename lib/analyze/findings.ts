@@ -11,7 +11,7 @@ import type {
   Severity,
 } from "../types";
 import { markdownToPlain } from "../parse/markdown";
-import { contentTokens, normForMatch, queryCoverage, quoteAppearsIn, stem, termCounts, truncate } from "./text";
+import { contentTokens, normForMatch, phraseSet, queryCoverage, quoteAppearsIn, stem, truncate } from "./text";
 import { rootDomain, sameUrl } from "../url";
 import { fetchErrorHelp } from "./fetchErrors";
 
@@ -52,19 +52,37 @@ function pagePath(url: string): string {
   }
 }
 
-export function suggestDescription(markdown: string, h1: string | null): string {
-  let plain = markdownToPlain(markdown).replace(/\s+/g, " ").trim();
-  if (h1 && plain.toLowerCase().startsWith(h1.toLowerCase())) plain = plain.slice(h1.length).trim();
-  const sentences = plain.match(/[^.!?]+[.!?]/g) || [plain];
+// Notices, banners and site chrome that should never become a page description.
+const BOILERPLATE = /redirects here|from wikipedia|please help|this article|learn how and when|cookie|subscribe|sign in|log in|javascript|skip to|all rights reserved|table of contents/i;
+
+function fitToLength(text: string, max = 155): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  const sentences = t.match(/[^.!?]+[.!?]/g) || [];
   let out = "";
   for (const s of sentences) {
     const next = (out + " " + s.trim()).trim();
-    if (next.length > 155) break;
+    if (next.length > max) break;
     out = next;
-    if (out.length > 110) break;
   }
-  if (!out) out = plain.slice(0, 152).replace(/\s+\S*$/, "") + "...";
-  return out.replace(/"/g, "'");
+  return out.length >= 60 ? out : t.slice(0, max - 3).replace(/\s+\S*$/, "") + "...";
+}
+
+/**
+ * Drafts a meta description. Prefers the agent's own answer to the query (it is a direct answer,
+ * which is what a good description is), else the first substantive paragraph of the extracted text.
+ */
+export function suggestDescription(markdown: string, h1: string | null, agentAnswer?: string | null): string {
+  if (agentAnswer && agentAnswer.split(/\s+/).length >= 8) return fitToLength(agentAnswer).replace(/"/g, "'");
+  const blocks = markdown.split(/\n\s*\n/).map((b) => b.trim());
+  for (const b of blocks) {
+    if (/^(#|\||[-*+]\s|\d+[.)]\s|>)/.test(b)) continue;
+    const plain = markdownToPlain(b).replace(/\s+/g, " ").trim();
+    if (plain.split(" ").length < 12 || BOILERPLATE.test(plain)) continue;
+    if (h1 && plain.toLowerCase() === h1.toLowerCase()) continue;
+    return fitToLength(plain).replace(/"/g, "'");
+  }
+  return fitToLength(markdownToPlain(markdown)).replace(/"/g, "'");
 }
 
 function ssrAdvice(hints: string[]): string {
@@ -101,7 +119,7 @@ function jsonLdSuggestion(b: StageBundle): string {
   const p = b.fetch?.page;
   const url = b.browser?.finalUrl || p?.finalUrl || b.url;
   const title = r?.title || p?.title || "Page title";
-  const desc = r?.metaDescription || p?.description || (p ? suggestDescription(p.markdown, r?.h1[0] ?? null) : "Short description");
+  const desc = r?.metaDescription || p?.description || (p ? suggestDescription(p.markdown, r?.h1[0] ?? null, b.agent?.answer?.answer_summary) : "Short description");
   const image = r?.og.image || p?.imageLinks[0] || undefined;
   const site = rootDomain(url);
   let obj: Record<string, unknown>;
@@ -577,7 +595,7 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
     });
   }
   if (!f.page.description) {
-    const draft = suggestDescription(md, ren?.h1[0] ?? null);
+    const draft = suggestDescription(md, ren?.h1[0] ?? null, b.agent?.answer?.answer_summary);
     out.push({
       id: "meta-description-missing",
       category: "metadata",
@@ -586,7 +604,7 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
       title: "No meta description extracted",
       evidence: ["Fetch returned description: null (no og:description or meta description)."],
       visibilityImpact: "Without a description, search engines and AI tools write their own summary from whatever text they find first.",
-      fix: { summary: "Add a meta description (drafted from your own first paragraph)", steps: ["Edit the draft below so it states what the page offers in under 155 characters."], code: `<meta name="description" content="${draft}">\n<meta property="og:description" content="${draft}">`, effort: "minutes" },
+      fix: { summary: "Add a meta description (drafted from your page)", steps: ["Edit the draft below so it states what the page offers in under 155 characters."], code: `<meta name="description" content="${draft}">\n<meta property="og:description" content="${draft}">`, effort: "minutes" },
       sources: ["fetch"],
     });
   }
@@ -855,24 +873,48 @@ function visibilityChecks(b: StageBundle, out: Finding[]) {
   }
 }
 
-// Words that describe page furniture rather than topics.
-const GAP_IGNORE = new Set(["frequently", "asked", "question", "questions", "faq", "answer", "answers", "yes", "no", "start", "today", "day", "days", "month", "year", "more", "less", "great", "easy"].map(stem));
+// Words that describe page furniture or are too general to be a topic.
+const GAP_IGNORE = new Set(
+  (
+    "frequently asked question questions faq answer answers yes no start today day days month year more less great easy " +
+    "type types create creating know knowing make making made guide guides across even helpful help take taking evolve " +
+    "use using used need needs want good better best many much well first work works working find look thing things " +
+    "people important different example examples information learn understand include includes including based provide " +
+    "provides able often every without within while however also really simple simply right overview introduction basics " +
+    "next previous related read article page pages site website click step steps way ways time times part"
+  )
+    .split(/\s+/)
+    .map(stem),
+);
 
 /**
- * Terms that most competing pages use and the target page never uses. Bigrams first (more specific),
- * overlapping bigrams merged into phrases ("money back" + "back guarantee" -> "money back guarantee"),
- * then single words not already covered.
+ * Topics most competing pages cover and the target page never mentions.
+ * Phrases (two adjacent words) are checked as phrases, so "search console" counts as missing even if
+ * "search" and "console" appear separately. Overlapping phrases are merged ("money back" + "back
+ * guarantee" become "money back guarantee"). Single words only count when a competitor uses them in a
+ * heading, which keeps generic vocabulary out.
  */
 export function topicGaps(
   targetText: string,
-  comps: { url: string; title: string; terms: Record<string, number> }[],
+  comps: { url: string; title: string; terms: Record<string, number>; headings?: string[] }[],
   limit = 10,
 ): [string, { n: number; total: number }][] {
-  const targetTerms = termCounts(targetText, 5000);
-  const targetWords = new Set(Object.keys(targetTerms).filter((t) => !t.includes(" ")));
-  const brandWords = new Set(
-    comps.flatMap((c) => contentTokens(rootDomain(c.url).split(".")[0] + " " + (c.title.split(/\s[|\u2013\u2014-]\s/)[1] || "")).map(stem)),
-  );
+  const target = phraseSet(targetText);
+  // Brand names: the domain label, plus title segments that contain it ("Google Search Central", "Digital.gov").
+  // A gap term is dropped only if the whole term is part of a brand name, so "google search" is dropped
+  // but "search console" is kept even though "search" appears in "Google Search Central".
+  const brands = comps.flatMap((c) => {
+    const label = rootDomain(c.url).split(".")[0].toLowerCase();
+    const segs = c.title.split(/\s[|\u2013\u2014:-]\s/).slice(1).map((sg) => sg.toLowerCase().replace(/[^a-z0-9]/g, ""));
+    return [label, ...segs.filter((n) => n.length > 1 && (n.includes(label) || label.includes(n)))];
+  });
+  const isBrand = (term: string) => {
+    const joined = term.replace(/\s+/g, "");
+    return brands.some((b) => b.includes(joined));
+  };
+  const headingTerms = new Map<string, number>();
+  for (const c of comps) for (const t of phraseSet((c.headings || []).join("\n"))) headingTerms.set(t, (headingTerms.get(t) || 0) + 1);
+
   const df = new Map<string, { n: number; total: number }>();
   for (const c of comps) {
     for (const [term, count] of Object.entries(c.terms)) {
@@ -883,15 +925,12 @@ export function topicGaps(
     }
   }
   const need = Math.max(2, Math.ceil(comps.length * 0.66));
-  const usable = ([term, v]: [string, { n: number; total: number }]) =>
-    v.n >= need &&
-    v.total >= 3 &&
-    term.length > 3 &&
-    !term.split(" ").some((w) => brandWords.has(w) || GAP_IGNORE.has(w));
-  const byStrength = (a: [string, { n: number; total: number }], c: [string, { n: number; total: number }]) => c[1].n - a[1].n || c[1].total - a[1].total;
+  const clean = (term: string) => !isBrand(term) && !term.split(" ").some((w) => w.length < 3 || GAP_IGNORE.has(w));
+  const byStrength = (a: [string, { n: number; total: number }], c: [string, { n: number; total: number }]) =>
+    (headingTerms.get(c[0]) || 0) - (headingTerms.get(a[0]) || 0) || c[1].n - a[1].n || c[1].total - a[1].total;
 
   const bigrams = [...df.entries()]
-    .filter((e) => e[0].includes(" ") && usable(e) && !(e[0] in targetTerms) && e[0].split(" ").some((w) => !targetWords.has(w)))
+    .filter(([term, v]) => term.includes(" ") && v.n >= need && v.total >= 3 && clean(term) && !target.has(term))
     .sort(byStrength);
   const phrases: [string, { n: number; total: number }][] = [];
   for (const [term, v] of bigrams) {
@@ -906,7 +945,10 @@ export function topicGaps(
   }
   const covered = new Set(phrases.flatMap(([p]) => p.split(" ")));
   const singles = [...df.entries()]
-    .filter((e) => !e[0].includes(" ") && usable(e) && !targetWords.has(e[0]) && !covered.has(e[0]))
+    .filter(
+      ([term, v]) =>
+        !term.includes(" ") && v.n >= need && term.length >= 5 && clean(term) && !target.has(term) && !covered.has(term) && (headingTerms.get(term) || 0) >= 1,
+    )
     .sort(byStrength);
   return [...phrases, ...singles].slice(0, limit);
 }
@@ -920,16 +962,17 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
 
   const gaps = topicGaps(
     markdownToPlain(f.page.markdown) + "\n" + f.stats.headings.map((h) => h.text).join("\n"),
-    comps.map((c) => ({ url: c.url, title: c.title, terms: c.terms })),
+    comps.map((c) => ({ url: c.url, title: c.title, terms: c.terms, headings: c.stats?.headings.map((h) => h.text) })),
   );
+  const ranksTop3 = s.target.position !== null && s.target.position <= 3;
 
   if (gaps.length >= 3) {
     out.push({
       id: "gap-terms",
       category: "content_gap",
-      severity: "medium",
+      severity: ranksTop3 ? "low" : "medium",
       confidence: "medium",
-      title: `${gaps.length} topics the pages above you cover and you do not`,
+      title: `${gaps.length} topics the top-ranking pages cover and this page does not`,
       evidence: [
         `Compared with: ${comps.map((c) => `#${c.position} ${rootDomain(c.url)}`).join(", ")}`,
         `Missing from your extracted text: ${gaps.map(([t, v]) => `${t} (${v.n}/${comps.length})`).join(", ")}`,

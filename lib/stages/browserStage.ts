@@ -38,24 +38,54 @@ function onlyAfterJs(raw: HtmlFacts, rendered: HtmlFacts) {
   };
 }
 
-async function probe(browser: Browser, url: string, bot: { bot: string; ua: string }, baselineWords: number, baselineStatus: number | null): Promise<BotProbe> {
+export interface ProbeState {
+  canCreateContext: boolean; // TinyFish sessions may refuse extra browser contexts; remember after the first refusal
+  contextError: string | null;
+}
+
+export async function probe(
+  browser: Browser,
+  sharedContext: BrowserContext,
+  state: ProbeState,
+  url: string,
+  bot: { bot: string; ua: string },
+  baselineWords: number,
+  baselineStatus: number | null,
+): Promise<BotProbe> {
   let page: Page | null = null;
   let ownContext: BrowserContext | null = null;
   try {
-    try {
-      ownContext = await browser.newContext({ userAgent: bot.ua, javaScriptEnabled: false });
-      page = await ownContext.newPage();
-    } catch {
-      // Some remote browsers only expose the default context. Fall back to it and set the UA per request.
-      page = await browser.contexts()[0].newPage();
+    if (state.canCreateContext) {
+      try {
+        ownContext = await browser.newContext({ userAgent: bot.ua, javaScriptEnabled: false });
+        page = await ownContext.newPage();
+      } catch (err) {
+        state.canCreateContext = false;
+        state.contextError = (err as Error).message.slice(0, 120);
+        if (ownContext) await ownContext.close().catch(() => {});
+        ownContext = null;
+      }
     }
+    // Fall back to the context that already loaded the page, and set the user-agent per request.
+    if (!page) page = await sharedContext.newPage();
+
     // Only the HTML document matters here. Skipping subresources keeps the probe fast and cheap.
-    // The user-agent header is also set explicitly in case the context-level override is not applied.
-    await page.route("**/*", (r) =>
-      r.request().resourceType() === "document"
-        ? r.continue({ headers: { ...r.request().headers(), "user-agent": bot.ua } })
-        : r.abort(),
-    );
+    // The user-agent header is set explicitly in case the context-level override is not applied.
+    let routed = false;
+    try {
+      await page.route("**/*", (r) =>
+        r.request().resourceType() === "document"
+          ? r.continue({ headers: { ...r.request().headers(), "user-agent": bot.ua } })
+          : r.abort(),
+      );
+      routed = true;
+    } catch {
+      routed = false;
+    }
+    if (!routed && !ownContext) {
+      const cdp = await sharedContext.newCDPSession(page);
+      await cdp.send("Network.setUserAgentOverride", { userAgent: bot.ua });
+    }
     const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
     const status = resp?.status() ?? null;
     const body = resp ? await resp.text().catch(() => "") : "";
@@ -71,7 +101,8 @@ async function probe(browser: Browser, url: string, bot: { bot: string; ua: stri
   } catch (err) {
     if (ownContext) await ownContext.close().catch(() => {});
     else if (page) await page.close().catch(() => {});
-    return { bot: bot.bot, userAgent: bot.ua, status: null, words: 0, challenge: false, verdict: "error", error: (err as Error).message.slice(0, 200) };
+    const reason = (err as Error).message.slice(0, 160) + (state.contextError ? ` (new context refused: ${state.contextError})` : "");
+    return { bot: bot.bot, userAgent: bot.ua, status: null, words: 0, challenge: false, verdict: "error", error: reason };
   }
 }
 
@@ -165,7 +196,12 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
     });
 
     const t2 = Date.now();
-    out.botProbes = await Promise.all(PROBE_BOTS.map((b) => probe(browser!, out.finalUrl || pageUrl, b, out.raw!.words, out.status)));
+    // One at a time: a remote session may limit parallel pages or contexts.
+    const state: ProbeState = { canCreateContext: true, contextError: null };
+    out.botProbes = [];
+    for (const b of PROBE_BOTS) {
+      out.botProbes.push(await probe(browser, context, state, out.finalUrl || pageUrl, b, out.raw!.words, out.status));
+    }
     calls.push({
       endpoint: "browser",
       purpose: `Request the page as ${PROBE_BOTS.map((b) => b.bot).join(", ")} (JavaScript off) to detect edge blocking`,

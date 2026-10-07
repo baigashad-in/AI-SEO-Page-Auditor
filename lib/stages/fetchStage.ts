@@ -142,6 +142,7 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
   let smUrl: string | null = null;
   let smText = "";
   let smLinks: string[] = [];
+  let smError: string | null = null;
   if (guessRaw?.text && (!declared.length || declared.some((d) => normalizeUrl(d) === normalizeUrl(sitemapGuess)))) {
     smUrl = sitemapGuess;
     smText = String(guessRaw.text);
@@ -151,12 +152,20 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
     const t1 = Date.now();
     try {
       const r = await tfFetch({ urls: [smUrl], format: "markdown", links: true, ttl: 3600 });
-      calls.push({ endpoint: "fetch", purpose: "Sitemap declared in robots.txt", ms: Date.now() - t1, ok: true });
       const sm = r.results[0];
       smText = sm?.text ? String(sm.text) : "";
       smLinks = sm?.links || [];
+      if (!smText) smError = r.errors[0]?.error || "empty response";
+      calls.push({
+        endpoint: "fetch",
+        purpose: "Sitemap declared in robots.txt",
+        ms: Date.now() - t1,
+        ok: !smError,
+        detail: smError ? `could not read: ${smError}` : undefined,
+      });
     } catch (err) {
-      calls.push({ endpoint: "fetch", purpose: "Sitemap declared in robots.txt", ms: Date.now() - t1, ok: false, detail: (err as Error).message });
+      smError = (err as Error).message;
+      calls.push({ endpoint: "fetch", purpose: "Sitemap declared in robots.txt", ms: Date.now() - t1, ok: false, detail: smError });
     }
   } else if (guessRaw?.text) {
     smUrl = sitemapGuess;
@@ -198,6 +207,9 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
         result.sitemap = { checkedUrl: smUrl, containsUrl: false, note: "Sitemap read, page URL not listed." };
       }
     }
+  } else if (smUrl) {
+    // A sitemap exists (declared in robots.txt) but could not be read: say so instead of claiming there is none.
+    result.sitemap = { checkedUrl: smUrl, containsUrl: null, note: `Sitemap declared in robots.txt (${smUrl}) but Fetch could not read it (${smError || "no content"}). Not checked.` };
   } else {
     result.sitemap = { checkedUrl: null, containsUrl: null, note: "No sitemap found at /sitemap.xml or in robots.txt." };
   }

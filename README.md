@@ -169,7 +169,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 27 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring
+npm test           # 41 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions
 npm run typecheck
 ```
 

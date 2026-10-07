@@ -207,6 +207,13 @@ export default function Report({ report: r }: { report: AuditReport }) {
         </ul>
       </section>
 
+      {r.doToday.length === 0 && (
+        <section>
+          <h2>Do these today</h2>
+          <p>Nothing urgent. The remaining findings below are low priority polish.</p>
+        </section>
+      )}
+
       {r.doToday.length > 0 && (
         <section>
           <h2>Do these today</h2>
@@ -358,8 +365,12 @@ export default function Report({ report: r }: { report: AuditReport }) {
                       </td>
                       <td>{v.bot.note}</td>
                       <td className={v.allowed ? "yes" : "no"}>{v.allowed ? "Allowed" : `Blocked (${v.matchedRule})`}</td>
-                      <td className={probe ? (probe.verdict === "ok" ? "yes" : "no") : undefined}>
-                        {probe ? `${probe.verdict === "ok" ? "Same page" : probe.verdict}, HTTP ${probe.status ?? "error"}` : ""}
+                      <td className={probe ? (probe.verdict === "ok" ? "yes" : probe.verdict === "error" ? undefined : "no") : undefined}>
+                        {probe
+                          ? probe.verdict === "error"
+                            ? `Not tested: ${probe.error || "probe failed"}`
+                            : `${probe.verdict === "ok" ? "Same page" : probe.verdict}, HTTP ${probe.status ?? "n/a"}`
+                          : ""}
                       </td>
                     </tr>
                   );
