@@ -113,7 +113,7 @@ The stages feed each other rather than running side by side. The Agent's evidenc
 | API | Calls per audit | What it does here | Why this API |
 | :- | :- | :- | :- |
 | **Fetch** | 2 to 3 batches | Extraction of the page plus its robots.txt, llms.txt and sitemap; later the top 3 competing pages. | This is what an AI fetch tool reads. Its `title`, `description`, `author` and `published_date` fields show which metadata survives extraction. |
-| **Browser** | 1 session | Raw server HTML (before JavaScript), rendered DOM, headers, screenshot, and the page requested again as OAI-SearchBot, ClaudeBot and PerplexityBot with JavaScript off. | Fetch returns already-cleaned content, so it cannot show what exists before JavaScript runs, read canonical, meta robots or JSON-LD, or reveal edge blocking of AI crawler user-agents. |
+| **Browser** | 1 session | Raw server HTML (before JavaScript), rendered DOM, headers, screenshot, and the page requested again on the same tab as the AI search crawlers OAI-SearchBot, Claude-SearchBot and PerplexityBot (plus ClaudeBot, a training crawler, for reference), loading only the HTML document. | Fetch returns already-cleaned content, so it cannot show what exists before JavaScript runs, read canonical, meta robots or JSON-LD, or reveal edge blocking of AI crawler user-agents. |
 | **Search** | 2 to 3 queries | Rank for the target query (top 20), an index probe (the page's own title within its own domain), and the pages that outrank it. | Visibility: is the page found, for what, and who wins instead. |
 | **Agent** | 1 run | Tries to answer the query on the live page; may dismiss pop-ups and open tabs. Structured output: answer found, exact evidence quote, where it was, blockers, missing information. | The only API that interacts with the page, so it finds answers hidden behind clicks and overlays. |
 
@@ -169,7 +169,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 41 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions
+npm test           # 46 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
 npm run typecheck
 ```
 

@@ -14,6 +14,7 @@ import { markdownToPlain } from "../parse/markdown";
 import { contentTokens, normForMatch, phraseSet, queryCoverage, quoteAppearsIn, stem, truncate } from "./text";
 import { rootDomain, sameUrl } from "../url";
 import { fetchErrorHelp } from "./fetchErrors";
+import { AI_BOTS } from "../parse/robots";
 
 export interface StageBundle {
   fetch: FetchStageResult | null;
@@ -301,24 +302,28 @@ function accessChecks(b: StageBundle, out: Finding[]) {
     });
   }
 
-  // Edge blocking of AI crawler user agents
+  // Edge blocking of AI crawler user agents. Search crawlers decide visibility; training crawlers do not.
   if (br?.botProbes.length) {
+    const purposeOf = (bot: string) => AI_BOTS.find((x) => x.token === bot)?.purpose ?? "ai_search";
     const bad = br.botProbes.filter((p) => p.verdict === "blocked" || p.verdict === "degraded");
-    if (bad.length) {
-      const robotsAllows = f?.robots.verdicts.filter((v) => v.allowed).map((v) => v.bot.token) ?? [];
+    const badSearch = bad.filter((p) => purposeOf(p.bot) !== "training");
+    const badTraining = bad.filter((p) => purposeOf(p.bot) === "training");
+    const robotsAllows = f?.robots.verdicts.filter((v) => v.allowed).map((v) => v.bot.token) ?? [];
+    const evidenceFor = (list: typeof bad) => [
+      `Normal browser request: HTTP ${br.status}, ${br.raw?.words ?? 0} words in raw HTML.`,
+      ...list.map((p) => `${p.bot} user-agent: HTTP ${p.status ?? "error"}, ${p.words} words${p.challenge ? ", bot challenge page" : ""} (${p.verdict}).`),
+      ...list.filter((p) => robotsAllows.includes(p.bot)).map((p) => `robots.txt allows ${p.bot}, so this block happens at the server or CDN, not in robots.txt.`),
+      "Caveat: requests came from a TinyFish residential IP with representative user-agent strings. Real crawlers use verified IP ranges and may be treated differently.",
+    ];
+    if (badSearch.length) {
       out.push({
         id: "access-edge-blocks-ai-bots",
         category: "access",
-        severity: bad.some((p) => p.verdict === "blocked") ? "high" : "medium",
+        severity: badSearch.some((p) => p.verdict === "blocked") ? "high" : "medium",
         confidence: "medium",
-        title: `Server or CDN treats AI crawler user-agents differently (${bad.map((p) => p.bot).join(", ")})`,
-        evidence: [
-          `Normal browser request: HTTP ${br.status}, ${br.raw?.words ?? 0} words in raw HTML.`,
-          ...bad.map((p) => `${p.bot} user-agent: HTTP ${p.status ?? "error"}, ${p.words} words${p.challenge ? ", bot challenge page" : ""} (${p.verdict}).`),
-          ...bad.filter((p) => robotsAllows.includes(p.bot)).map((p) => `robots.txt allows ${p.bot}, so this block happens at the server or CDN, not in robots.txt.`),
-          "Caveat: requests came from a TinyFish residential IP. Real crawlers use verified IP ranges and may be treated differently.",
-        ],
-        visibilityImpact: "If the real crawler gets a challenge page, the page is never indexed by that AI search engine even though robots.txt allows it.",
+        title: `Server or CDN blocks AI search crawler user-agents (${badSearch.map((p) => p.bot).join(", ")})`,
+        evidence: evidenceFor(badSearch),
+        visibilityImpact: "These crawlers decide whether the page can appear in ChatGPT, Claude or Perplexity search answers. If the real crawler gets a challenge page, the page is not indexed there even though robots.txt allows it.",
         fix: {
           summary: "Allow verified AI search crawlers at the edge",
           steps: [
@@ -328,6 +333,20 @@ function accessChecks(b: StageBundle, out: Finding[]) {
           ],
           effort: "hours",
         },
+        sources: ["browser"],
+      });
+    }
+    if (badTraining.length) {
+      out.push({
+        id: "access-edge-blocks-training-bots",
+        category: "access",
+        severity: "low",
+        confidence: "medium",
+        title: `Server or CDN blocks the training crawler user-agent (${badTraining.map((p) => p.bot).join(", ")})`,
+        evidence: evidenceFor(badTraining),
+        visibilityImpact:
+          "This crawler collects data for model training, not search. Blocking it does not remove the page from AI search answers; the search crawlers above decide that. Many sites block it on purpose.",
+        fix: { summary: "No action needed if intentional", steps: ["Keep the rule if you do not want your content used for training.", "Make sure the same rule does not also catch the search crawlers."], effort: "minutes" },
         sources: ["browser"],
       });
     }
@@ -766,7 +785,7 @@ function structuredDataChecks(b: StageBundle, out: Finding[]) {
     out.push({
       id: "schema-missing",
       category: "structured_data",
-      severity: "medium",
+      severity: type === "WebPage" ? "low" : "medium", // WebPage markup earns no rich result
       confidence: "medium",
       title: `No structured data (suggested type: ${type})`,
       evidence: ["No application/ld+json blocks in raw or rendered HTML."],
@@ -828,7 +847,13 @@ function visibilityChecks(b: StageBundle, out: Finding[]) {
       title: `Ranks #${pos} for "${s.query}"`,
       evidence: [`TinyFish Search (${s.location}). Above you: ${s.results.filter((r) => r.position < pos).slice(0, 3).map((r) => `#${r.position} ${rootDomain(r.url)}`).join(", ") || "nobody"}.`],
       visibilityImpact: pos <= 3 ? "Top results are the ones AI search tools most often read and cite." : "AI search tools tend to read only the first few results. Moving up matters more than in classic search.",
-      fix: { summary: pos <= 3 ? "Protect the position" : "Move into the top 3", steps: pos <= 3 ? ["Keep the readability issues below at zero so AI tools can quote you."] : ["Compare against the pages above you in the content-gap findings."], effort: pos <= 3 ? "minutes" : "days" },
+      fix: { summary: pos <= 3 ? "Protect the position" : "Move into the top 3", steps:
+          pos <= 3
+            ? ["Keep the readability issues below at zero so AI tools can quote you."]
+            : [
+                `Open the pages above you and note what they answer that this page does not: ${s.results.filter((r) => r.position < pos).slice(0, 3).map((r) => r.url).join(", ")}`,
+                "Check the content-gap and answerability findings for specific missing topics.",
+              ], effort: pos <= 3 ? "minutes" : "days" },
       sources: ["search"],
     });
 
@@ -957,8 +982,11 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
   const s = b.search;
   const f = b.fetch;
   if (!s || !f?.page || !f.stats) return;
-  const comps = s.competitors.filter((c) => c.fetched && c.stats);
+  // Compare only with pages that outrank this one. A #1 page has nothing to learn from pages below it.
+  const pos = s.target.position;
+  const comps = s.competitors.filter((c) => c.fetched && c.stats && (pos === null || c.position < pos));
   if (comps.length < 2) return;
+  const whom = pos === null ? "top-ranking pages" : "pages ranking above this one";
 
   const gaps = topicGaps(
     markdownToPlain(f.page.markdown) + "\n" + f.stats.headings.map((h) => h.text).join("\n"),
@@ -972,7 +1000,7 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
       category: "content_gap",
       severity: ranksTop3 ? "low" : "medium",
       confidence: "medium",
-      title: `${gaps.length} topics the top-ranking pages cover and this page does not`,
+      title: `${gaps.length} topics the ${whom} cover and this page does not`,
       evidence: [
         `Compared with: ${comps.map((c) => `#${c.position} ${rootDomain(c.url)}`).join(", ")}`,
         `Missing from your extracted text: ${gaps.map(([t, v]) => `${t} (${v.n}/${comps.length})`).join(", ")}`,
@@ -991,7 +1019,7 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
       category: "content_gap",
       severity: "medium",
       confidence: "medium",
-      title: `Competing pages give AI tools ${Math.round(median / Math.max(f.stats.words, 1))}x more text`,
+      title: `The ${whom} give AI tools ${Math.round(median / Math.max(f.stats.words, 1))}x more text`,
       evidence: comps.map((c) => `#${c.position} ${rootDomain(c.url)}: ${c.stats!.words} words, ${c.stats!.headings.length} headings, ${c.stats!.listItems} list items, ${c.stats!.tableRows} table rows`).concat([`You: ${f.stats.words} words, ${f.stats.headings.length} headings`]),
       visibilityImpact: "Length is not a ranking factor by itself, but depth usually means more answered sub-questions and more quotable passages.",
       fix: { summary: "Add depth where it answers real questions", steps: ["Use the agent's missing-information list and the topic gaps as the outline for new sections."], effort: "hours" },
@@ -1006,7 +1034,7 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
       category: "content_gap",
       severity: "low",
       confidence: "medium",
-      title: "Competitors use lists and tables; your page is mostly prose",
+      title: `The ${whom} use lists and tables; this page is mostly prose`,
       evidence: comps.map((c) => `#${c.position} ${rootDomain(c.url)}: ${c.stats!.listItems} list items, ${c.stats!.tableRows} table rows`).concat([`You: ${f.stats.listItems} list items, ${f.stats.tableRows} table rows`]),
       visibilityImpact: "Lists and tables extract cleanly and are easy to quote as steps, comparisons and specs.",
       fix: { summary: "Turn steps, specs and comparisons into real HTML lists and tables", steps: ["Use <ol>/<ul> and <table>, not styled <div>s."], effort: "hours" },
@@ -1164,7 +1192,9 @@ export function buildStrengths(b: StageBundle): string[] {
   const f = b.fetch;
   if (f && f.robots.verdicts.filter((v) => v.bot.purpose === "ai_search").every((v) => v.allowed)) s.push("robots.txt allows every AI search crawler checked (OAI-SearchBot, Claude-SearchBot, PerplexityBot, Applebot).");
   if (br?.raw && br.rendered && br.rendered.words > 0 && br.raw.words / br.rendered.words >= 0.9) s.push(`Content is in the server HTML (${br.raw.words} of ${br.rendered.words} words), so non-JavaScript AI crawlers can read it.`);
-  if (br?.botProbes.length && br.botProbes.every((p) => p.verdict === "ok")) s.push("Requests with AI crawler user-agents got the same page as a normal browser.");
+  const searchProbes = br?.botProbes.filter((p) => AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
+  if (searchProbes.length && searchProbes.every((p) => p.verdict === "ok"))
+    s.push(`Requests with AI search crawler user-agents (${searchProbes.map((p) => p.bot).join(", ")}) got the same page as a normal browser.`);
   if (f?.stats && f.stats.words >= 600 && f.stats.headings.length >= 3) s.push(`Extraction is substantial and structured: ${f.stats.words} words under ${f.stats.headings.length} headings.`);
   if (br?.rendered && br.rendered.jsonLd.blocks > 0 && br.rendered.jsonLd.parseErrors === 0) s.push(`Valid structured data: ${br.rendered.jsonLd.types.join(", ") || "JSON-LD present"}.`);
   if (b.search?.target.position && b.search.target.position <= 3) s.push(`Ranks #${b.search.target.position} for "${b.search.query}".`);

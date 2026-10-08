@@ -1,7 +1,7 @@
 // Regression tests for bugs found in the first live TinyFish run (Wikipedia SEO article).
 import { describe, expect, it } from "vitest";
 import { htmlFacts } from "../lib/parse/html";
-import { markdownToPlain } from "../lib/parse/markdown";
+import { markdownToPlain, markdownStats as markdownStatsFor } from "../lib/parse/markdown";
 import { buildFindings, suggestDescription, topicGaps } from "../lib/analyze/findings";
 import { buildReport } from "../lib/analyze/report";
 import { termCounts } from "../lib/analyze/text";
@@ -104,5 +104,76 @@ describe("report polish", () => {
       const f = r.findings.find((x) => x.id === id)!;
       expect(["critical", "high", "medium"]).toContain(f.severity);
     }
+  });
+});
+
+describe("second live run: react.dev and Wikipedia", () => {
+  const comp = (n: string, pos: number) => ({
+    url: `https://${n}.com/x`,
+    position: pos,
+    title: `${n} course`,
+    fetched: true,
+    stats: { words: 900, headings: [{ level: 2, text: "Certificate course" }], h1Count: 1, listItems: 9, tableRows: 4, paragraphs: 9, firstWords: "" },
+    terms: termCounts("Earn a certificate course. Certificate course again. Certificate course."),
+  });
+  const search = (pos: number | null) => ({
+    query: "learn react",
+    queryDerived: false,
+    location: "US",
+    results: [],
+    pagesChecked: 1,
+    target: { position: pos, matchedUrl: null, serpTitle: null, serpSnippet: null },
+    domain: { bestPosition: pos, urls: [] },
+    indexProbe: { query: "", found: true, position: 1, domainUrls: [] },
+    competitors: [comp("alpha", 2), comp("beta", 3), comp("gamma", 4)],
+    calls: [],
+  });
+  const md = "# Quick Start\n\nWelcome to the React documentation. This page introduces the concepts you will use every day.";
+  const fetch = {
+    input: { url: "https://react.dev/learn" },
+    page: { url: "https://react.dev/learn", finalUrl: "https://react.dev/learn", title: "Quick Start", description: "d", language: "en", author: null, publishedDate: null, markdown: md, links: [], imageLinks: [], latencyMs: 1 },
+    pageError: null,
+    stats: markdownStatsFor(md),
+    robots: { found: true, url: "", note: "", verdicts: [], sitemaps: [] },
+    llmsTxt: { found: true, url: "", chars: 10 },
+    sitemap: { checkedUrl: "x", containsUrl: true, note: "" },
+    links: { internal: 1, external: 0 },
+    calls: [],
+  };
+  it("does not compare a #1 page with pages ranked below it", () => {
+    const ids = buildFindings({ fetch, browser: null, search: search(1) as never, agent: null, query: "learn react", queryDerived: false, url: "https://react.dev/learn" }).map((x) => x.id);
+    expect(ids).not.toContain("gap-terms");
+    expect(ids).not.toContain("gap-depth");
+  });
+  it("still compares an unranked page with the top results", () => {
+    const ids = buildFindings({ fetch, browser: null, search: search(null) as never, agent: null, query: "learn react", queryDerived: false, url: "https://react.dev/learn" }).map((x) => x.id);
+    expect(ids).toContain("gap-depth");
+  });
+  it("does not lower readability for a blocked training crawler", () => {
+    const facts = htmlFacts("<html><head><title>T</title></head><body><main><h1>H</h1><p>Some words here for the page.</p></main></body></html>");
+    const browser = (verdictFor: Record<string, "ok" | "blocked">): BrowserStageResult => ({
+      ok: true, requestedUrl: "https://x.com", finalUrl: "https://x.com", status: 200, redirectChain: [],
+      headers: { xRobotsTag: null, contentType: "text/html" }, raw: facts, rendered: facts, renderedInnerTextWords: facts.words,
+      onlyAfterJs: { headings: [], title: false, description: false, canonical: false, h1: false, jsonLd: false },
+      botProbes: Object.entries(verdictFor).map(([bot, verdict]) => ({ bot, userAgent: "x", status: verdict === "ok" ? 200 : 403, words: 5, challenge: verdict !== "ok", verdict })),
+      screenshot: null, calls: [],
+    });
+    const base = { fetch: null, search: null, agent: null, query: "q", queryDerived: false, url: "https://x.com" };
+    const ok = buildReport({ ...base, browser: browser({ "OAI-SearchBot": "ok", ClaudeBot: "ok" }) }, { url: "https://x.com" }).scores.readability;
+    const training = buildReport({ ...base, browser: browser({ "OAI-SearchBot": "ok", ClaudeBot: "blocked" }) }, { url: "https://x.com" }).scores.readability;
+    const searchBlocked = buildReport({ ...base, browser: browser({ "OAI-SearchBot": "blocked", ClaudeBot: "ok" }) }, { url: "https://x.com" }).scores.readability;
+    expect(training).toBe(ok);
+    expect(searchBlocked).toBeLessThan(ok);
+  });
+  it("rates missing WebPage markup as low", () => {
+    const facts = htmlFacts("<html><head><title>Docs</title></head><body><main><h1>Docs</h1><p>Reference text for developers.</p></main></body></html>");
+    const browser: BrowserStageResult = {
+      ok: true, requestedUrl: "https://x.com/docs", finalUrl: "https://x.com/docs", status: 200, redirectChain: [],
+      headers: { xRobotsTag: null, contentType: "text/html" }, raw: facts, rendered: facts, renderedInnerTextWords: facts.words,
+      onlyAfterJs: { headings: [], title: false, description: false, canonical: false, h1: false, jsonLd: false },
+      botProbes: [], screenshot: null, calls: [],
+    };
+    const f = buildFindings({ fetch: null, browser, search: null, agent: null, query: "docs", queryDerived: false, url: "https://x.com/docs" });
+    expect(f.find((x) => x.id === "schema-missing")?.severity).toBe("low");
   });
 });

@@ -40,7 +40,8 @@ function browserStage(rawHtml: string, renderedHtml: string): BrowserStageResult
     renderedInnerTextWords: rendered.words,
     onlyAfterJs: { headings: ["Plans"], title: false, description: false, canonical: !raw.canonical && !!rendered.canonical, h1: raw.h1.length === 0 && rendered.h1.length > 0, jsonLd: false },
     botProbes: [
-      { bot: "OAI-SearchBot", userAgent: "x", status: 200, words: 3, challenge: false, verdict: "ok" },
+      { bot: "OAI-SearchBot", userAgent: "x", status: 403, words: 2, challenge: true, verdict: "blocked" },
+      { bot: "Claude-SearchBot", userAgent: "x", status: 200, words: 3, challenge: false, verdict: "ok" },
       { bot: "ClaudeBot", userAgent: "x", status: 403, words: 2, challenge: true, verdict: "blocked" },
     ],
     screenshot: null,
@@ -70,6 +71,13 @@ describe("findings on a client-rendered page", () => {
     expect(findings.find((x) => x.id === "access-robots-training-blocked")!.severity).toBe("info");
     const rb = findings.find((x) => x.id === "access-robots-search-blocked")!;
     expect(rb.fix.code).toContain("Allow: /pricing");
+  });
+  it("grades a blocked search crawler high and a blocked training crawler low", () => {
+    const search = findings.find((x) => x.id === "access-edge-blocks-ai-bots")!;
+    expect(search.severity).toBe("high");
+    expect(search.title).toContain("OAI-SearchBot");
+    expect(search.title).not.toContain("ClaudeBot");
+    expect(findings.find((x) => x.id === "access-edge-blocks-training-bots")!.severity).toBe("low");
   });
   it("flags edge blocking and late canonical/h1", () => {
     expect(ids).toContain("access-edge-blocks-ai-bots");

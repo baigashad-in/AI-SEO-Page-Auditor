@@ -12,10 +12,14 @@ import { parseInputUrl } from "../url";
 
 // Representative user-agent strings from each operator's public docs. Real crawlers also come from
 // verified IP ranges, so a block here is strong evidence and a pass is weak evidence.
+// Search crawlers decide visibility in AI answers; ClaudeBot (training only) is kept as a reference,
+// because sites often block training crawlers on purpose. CDNs match on the product token, so the
+// Claude-SearchBot string is representative (Anthropic documents the token, not a full string).
 export const PROBE_BOTS = [
   { bot: "OAI-SearchBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OAI-SearchBot/1.3; +https://openai.com/searchbot" },
-  { bot: "ClaudeBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)" },
+  { bot: "Claude-SearchBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-SearchBot/1.0; +https://www.anthropic.com)" },
   { bot: "PerplexityBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)" },
+  { bot: "ClaudeBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)" },
 ];
 
 function onlyAfterJs(raw: HtmlFacts, rendered: HtmlFacts) {

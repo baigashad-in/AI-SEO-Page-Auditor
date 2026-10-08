@@ -6,6 +6,7 @@ import { buildFindings, buildStrengths, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
 import { quoteAppearsIn, truncate } from "./text";
 import { rootDomain } from "../url";
+import { AI_BOTS } from "../parse/robots";
 
 function clamp(n: number, lo = 0, hi = 1) {
   return Math.max(lo, Math.min(hi, n));
@@ -26,7 +27,8 @@ export function computeScores(b: StageBundle): Scores {
     const blocked = f?.robots.verdicts.filter((v) => !v.allowed) ?? [];
     if (blocked.some((v) => v.bot.purpose === "classic_search")) a -= 15;
     a -= Math.min(24, blocked.filter((v) => v.bot.purpose === "ai_search").length * 8);
-    a -= Math.min(16, (br?.botProbes.filter((p) => p.verdict === "blocked").length ?? 0) * 8);
+    const searchBlocked = br?.botProbes.filter((p) => p.verdict === "blocked" && AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training").length ?? 0;
+    a -= Math.min(24, searchBlocked * 8);
     parts.push({ label: "Crawler access", score: Math.round(clamp(a, 0, 30)), max: 30 });
   }
 
@@ -147,7 +149,7 @@ export function buildConnection(b: StageBundle, scores: Scores): string[] {
 
   const blockedSearch = f?.robots.verdicts.filter((v) => !v.allowed && v.bot.purpose === "ai_search") ?? [];
   if (blockedSearch.length) lines.push(`robots.txt excludes ${blockedSearch.map((v) => v.bot.operator).join(", ")} search crawlers, so this page cannot appear in those answer engines regardless of its Google ranking.`);
-  const edge = br?.botProbes.filter((p) => p.verdict === "blocked") ?? [];
+  const edge = br?.botProbes.filter((p) => p.verdict === "blocked" && AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
   if (edge.length)
     lines.push(
       `Requests sent with the ${edge.map((p) => p.bot).join(", ")} user-agent got a block or challenge page from your server or CDN. If the real crawler is blocked too, that engine cannot index the page at all, whatever robots.txt says.`,
