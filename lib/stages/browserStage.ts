@@ -3,7 +3,7 @@
 // only exists after rendering is invisible to them. Fetch cannot answer this because it returns
 // cleaned, already-rendered content, so this stage drives a real remote Chromium over CDP.
 
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type Browser, type CDPSession, type Page, type Route } from "playwright-core";
 import type { AuditInput, BotProbe, BrowserStageResult, CallLog, HtmlFacts } from "../types";
 import { tfCreateBrowserSession, tfDeleteBrowserSession, TinyFishError } from "../tinyfish";
 import { htmlFacts, looksLikeChallenge } from "../parse/html";
@@ -38,52 +38,31 @@ function onlyAfterJs(raw: HtmlFacts, rendered: HtmlFacts) {
   };
 }
 
-export interface ProbeState {
-  canCreateContext: boolean; // TinyFish sessions may refuse extra browser contexts; remember after the first refusal
-  contextError: string | null;
-}
-
+/**
+ * Requests the page again with an AI crawler's user-agent, on the same tab that already loaded it.
+ * TinyFish closes a session's browser context when its last tab closes, so probes never open or close
+ * tabs or contexts: they reuse the open page and only load the HTML document (subresources are blocked).
+ */
 export async function probe(
-  browser: Browser,
-  sharedContext: BrowserContext,
-  state: ProbeState,
+  page: Page,
   url: string,
   bot: { bot: string; ua: string },
   baselineWords: number,
   baselineStatus: number | null,
 ): Promise<BotProbe> {
-  let page: Page | null = null;
-  let ownContext: BrowserContext | null = null;
+  const handler = (r: Route) =>
+    r.request().resourceType() === "document"
+      ? r.continue({ headers: { ...r.request().headers(), "user-agent": bot.ua } })
+      : r.abort();
+  let routed = false;
+  let cdp: CDPSession | null = null;
   try {
-    if (state.canCreateContext) {
-      try {
-        ownContext = await browser.newContext({ userAgent: bot.ua, javaScriptEnabled: false });
-        page = await ownContext.newPage();
-      } catch (err) {
-        state.canCreateContext = false;
-        state.contextError = (err as Error).message.slice(0, 120);
-        if (ownContext) await ownContext.close().catch(() => {});
-        ownContext = null;
-      }
-    }
-    // Fall back to the context that already loaded the page, and set the user-agent per request.
-    if (!page) page = await sharedContext.newPage();
-
-    // Only the HTML document matters here. Skipping subresources keeps the probe fast and cheap.
-    // The user-agent header is set explicitly in case the context-level override is not applied.
-    let routed = false;
     try {
-      await page.route("**/*", (r) =>
-        r.request().resourceType() === "document"
-          ? r.continue({ headers: { ...r.request().headers(), "user-agent": bot.ua } })
-          : r.abort(),
-      );
+      await page.route("**/*", handler);
       routed = true;
     } catch {
-      routed = false;
-    }
-    if (!routed && !ownContext) {
-      const cdp = await sharedContext.newCDPSession(page);
+      // Request interception unavailable: set the user-agent at the network layer instead.
+      cdp = await page.context().newCDPSession(page);
       await cdp.send("Network.setUserAgentOverride", { userAgent: bot.ua });
     }
     const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
@@ -95,14 +74,12 @@ export async function probe(
     const baselineOk = baselineStatus !== null && baselineStatus < 400;
     if (baselineOk && (challenge || (status !== null && status >= 400))) verdict = "blocked";
     else if (baselineWords >= 100 && words < baselineWords * 0.5) verdict = "degraded";
-    if (ownContext) await ownContext.close().catch(() => {});
-    else await page.close().catch(() => {});
     return { bot: bot.bot, userAgent: bot.ua, status, words, challenge, verdict };
   } catch (err) {
-    if (ownContext) await ownContext.close().catch(() => {});
-    else if (page) await page.close().catch(() => {});
-    const reason = (err as Error).message.slice(0, 160) + (state.contextError ? ` (new context refused: ${state.contextError})` : "");
-    return { bot: bot.bot, userAgent: bot.ua, status: null, words: 0, challenge: false, verdict: "error", error: reason };
+    return { bot: bot.bot, userAgent: bot.ua, status: null, words: 0, challenge: false, verdict: "error", error: (err as Error).message.slice(0, 200) };
+  } finally {
+    if (routed) await page.unroute("**/*", handler).catch(() => {});
+    if (cdp) await cdp.detach().catch(() => {});
   }
 }
 
@@ -182,7 +159,7 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
       .then((t) => wordCount(t))
       .catch(() => 0);
     out.finalUrl = page.url();
-    await page.close().catch(() => {});
+    // Keep this tab open: closing the last tab ends the TinyFish browser context, and the probes reuse it.
 
     out.raw = htmlFacts(rawHtml);
     out.rendered = htmlFacts(renderedHtml);
@@ -196,15 +173,15 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
     });
 
     const t2 = Date.now();
-    // One at a time: a remote session may limit parallel pages or contexts.
-    const state: ProbeState = { canCreateContext: true, contextError: null };
+    // One at a time, on the same tab (see probe()).
     out.botProbes = [];
     for (const b of PROBE_BOTS) {
-      out.botProbes.push(await probe(browser, context, state, out.finalUrl || pageUrl, b, out.raw!.words, out.status));
+      out.botProbes.push(await probe(page, out.finalUrl || pageUrl, b, out.raw!.words, out.status));
     }
+    await page.close().catch(() => {});
     calls.push({
       endpoint: "browser",
-      purpose: `Request the page as ${PROBE_BOTS.map((b) => b.bot).join(", ")} (JavaScript off) to detect edge blocking`,
+      purpose: `Request the page as ${PROBE_BOTS.map((b) => b.bot).join(", ")} (HTML document only) to detect edge blocking`,
       ms: Date.now() - t2,
       ok: true,
       detail: out.botProbes.map((p) => `${p.bot}: ${p.verdict}`).join(", "),
