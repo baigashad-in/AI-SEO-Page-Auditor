@@ -125,11 +125,26 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
   const finalForRules = result.page?.finalUrl || pageUrl;
   // An HTML page or bot challenge in place of robots.txt means the rules are unknown, not allow-all:
   // real crawlers may well receive the actual file.
+  // A title or HTML tags only count against the file when it does not parse as rules.
+  const robotsParses = !!robotsText && looksLikeRobots(robotsText);
   const robotsIsHtml =
-    !!robotsText && (robotsRaw?.title != null || /<html|<body|<div/i.test(robotsText) || looksLikeChallengeText(robotsText));
-  if (robotsText && looksLikeRobots(robotsText) && !robotsIsHtml) {
+    !!robotsText &&
+    (looksLikeChallengeText(robotsText, robotsRaw?.title ?? null) ||
+      (!robotsParses && (robotsRaw?.title != null || /<html|<body|<div/i.test(robotsText))));
+  if (robotsText && robotsParses && !robotsIsHtml) {
     const v = robotsVerdicts(robotsText, finalForRules);
-    result.robots = { found: true, url: robotsUrl, note: "Parsed with RFC 9309 matching.", verdicts: v.verdicts, sitemaps: v.sitemaps, status: "parsed" };
+    result.robots = {
+      found: true,
+      url: robotsUrl,
+      note: v.reflowed
+        ? "Parsed with RFC 9309 matching. The copy Fetch returned had lost its line breaks, so the rules were reconstructed; treat them as less certain."
+        : "Parsed with RFC 9309 matching.",
+      verdicts: v.verdicts,
+      sitemaps: v.sitemaps,
+      status: "parsed",
+      source: "fetch",
+      reflowed: v.reflowed,
+    };
   } else {
     const v = robotsVerdicts(null, finalForRules);
     let status: "absent" | "unreadable" = "unreadable";
@@ -147,7 +162,8 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
     } else {
       note = "robots.txt has no valid directives. Crawler rules unknown.";
     }
-    result.robots = { found: false, url: robotsUrl, note, verdicts: v.verdicts, sitemaps: [], status };
+    const excerpt = status === "unreadable" && robotsText ? robotsText.replace(/\s+/g, " ").trim().slice(0, 240) : undefined;
+    result.robots = { found: false, url: robotsUrl, note, verdicts: v.verdicts, sitemaps: [], status, source: "fetch", excerpt };
   }
 
   // llms.txt (informational only, see findings for why)

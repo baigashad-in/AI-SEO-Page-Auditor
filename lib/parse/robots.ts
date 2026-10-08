@@ -34,16 +34,37 @@ export interface ParsedRobots {
   groups: Group[];
   sitemaps: string[];
   validLines: number;
+  reflowed: boolean; // line breaks were missing and were restored before parsing
 }
 
-export function parseRobots(txt: string): ParsedRobots {
+const DIRECTIVE_AHEAD = /\s+(?=(?:user-agent|allow|disallow|sitemap|crawl-delay|host|clean-param|content-signal)\s*:)/gi;
+const DIRECTIVE = /(?:^|\s)(?:user-agent|allow|disallow|sitemap|crawl-delay|host|clean-param|content-signal)\s*:/gi;
+
+/**
+ * Restores line breaks when robots.txt arrives with its lines joined, as a markdown conversion can do:
+ * "# Welcome ... User-agent: * Disallow: /" would otherwise read as one long comment, or as a
+ * user-agent called "* disallow: /". Only applies when there are more directives than lines and at
+ * least one line holds two of them, so a normal file (one directive per line) is never touched.
+ */
+export function reflowRobots(txt: string): { text: string; reflowed: boolean } {
+  const lines = txt.split(/\r?\n/).filter((l) => l.trim());
+  const count = (l: string) => (l.match(DIRECTIVE) || []).length;
+  const total = lines.reduce((n, l) => n + count(l), 0);
+  if (!(total > lines.length && lines.some((l) => count(l) >= 2))) return { text: txt, reflowed: false };
+  const text = txt.replace(/\s+(?=#)/g, "\n").replace(DIRECTIVE_AHEAD, "\n");
+  return { text, reflowed: true };
+}
+
+export function parseRobots(input: string): ParsedRobots {
+  const { text: txt, reflowed } = reflowRobots(input);
   const groups: Group[] = [];
   const sitemaps: string[] = [];
   let current: Group | null = null;
   let lastWasAgent = false;
   let validLines = 0;
   for (const rawLine of txt.split(/\r?\n/)) {
-    const line = rawLine.replace(/#.*$/, "").trim();
+    // Markdown conversion can add list bullets or quote markers in front of lines.
+    const line = rawLine.replace(/#.*$/, "").replace(/^\s*(?:[-+]\s+|\d+[.)]\s+|>\s*)/, "").trim();
     if (!line) continue;
     const m = line.match(/^([A-Za-z-]+)\s*:\s*(.*)$/);
     if (!m) continue;
@@ -70,7 +91,7 @@ export function parseRobots(txt: string): ParsedRobots {
     }
     lastWasAgent = false;
   }
-  return { groups, sitemaps, validLines };
+  return { groups, sitemaps, validLines, reflowed };
 }
 
 function patternToRegex(path: string): RegExp {
@@ -106,13 +127,18 @@ export function isAllowed(parsed: ParsedRobots, token: string, pathWithQuery: st
   return { allowed: best.allow, group: name, rule: best.raw };
 }
 
-export function robotsVerdicts(robotsTxt: string | null, pageUrl: string): { verdicts: RobotsVerdict[]; sitemaps: string[] } {
+export function robotsVerdicts(
+  robotsTxt: string | null,
+  pageUrl: string,
+): { verdicts: RobotsVerdict[]; sitemaps: string[]; validLines: number; reflowed: boolean } {
   const u = new URL(pageUrl);
   const path = (u.pathname || "/") + (u.search || "");
   if (robotsTxt === null) {
     return {
       verdicts: AI_BOTS.map((bot) => ({ bot, allowed: true, matchedGroup: null, matchedRule: null })),
       sitemaps: [],
+      validLines: 0,
+      reflowed: false,
     };
   }
   const parsed = parseRobots(robotsTxt);
@@ -122,6 +148,8 @@ export function robotsVerdicts(robotsTxt: string | null, pageUrl: string): { ver
       return { bot, allowed: r.allowed, matchedGroup: r.group, matchedRule: r.rule };
     }),
     sitemaps: parsed.sitemaps,
+    validLines: parsed.validLines,
+    reflowed: parsed.reflowed,
   };
 }
 
