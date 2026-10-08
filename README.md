@@ -113,7 +113,7 @@ The stages feed each other rather than running side by side. The Agent's evidenc
 | API | Calls per audit | What it does here | Why this API |
 | :- | :- | :- | :- |
 | **Fetch** | 2 to 3 batches | Extraction of the page plus its robots.txt, llms.txt and sitemap; later the top 3 competing pages. | This is what an AI fetch tool reads. Its `title`, `description`, `author` and `published_date` fields show which metadata survives extraction. |
-| **Browser** | 1 session | Raw server HTML (before JavaScript), rendered DOM, headers, screenshot, and the page requested again on the same tab as the AI search crawlers OAI-SearchBot, Claude-SearchBot and PerplexityBot (plus ClaudeBot, a training crawler, for reference), loading only the HTML document. | Fetch returns already-cleaned content, so it cannot show what exists before JavaScript runs, read canonical, meta robots or JSON-LD, or reveal edge blocking of AI crawler user-agents. |
+| **Browser** | 1 session | Raw server HTML (before JavaScript), rendered DOM, headers, screenshot, robots.txt read as plain text from inside the page, and the page requested again on the same tab as the AI search crawlers OAI-SearchBot, Claude-SearchBot and PerplexityBot (plus ClaudeBot, a training crawler, for reference), loading only the HTML document. | Fetch returns already-cleaned content, so it cannot show what exists before JavaScript runs, read canonical, meta robots or JSON-LD, or reveal edge blocking of AI crawler user-agents. |
 | **Search** | 2 to 3 queries | Rank for the target query (top 20), an index probe (the page's own title within its own domain), and the pages that outrank it. | Visibility: is the page found, for what, and who wins instead. |
 | **Agent** | 1 run | Tries to answer the query on the live page; may dismiss pop-ups and open tabs. Structured output: answer found, exact evidence quote, where it was, blockers, missing information. | The only API that interacts with the page, so it finds answers hidden behind clicks and overlays. |
 
@@ -132,7 +132,7 @@ Each connection line is built from observed numbers, for example "Non-JavaScript
 
 ## What the audit checks
 
-* **Access:** Fetch errors (bot challenge, login wall, empty content); a real browser receiving a bot challenge page instead of the content (detected even when it returns HTTP 200); robots.txt or sitemap that come back as challenge pages (reported as unknown, never as allow-all); robots.txt rules per crawler with RFC 9309 matching (search, AI search, user-triggered and training bots treated differently); noindex and snippet limits; AI crawler user-agents blocked at the CDN; status and redirects; canonical pointing elsewhere; sitemap listing; llms.txt (rated low priority).
+* **Access:** Fetch errors (bot challenge, login wall, empty content); a real browser receiving a bot challenge page instead of the content (detected from the title and visible text of the whole page, even with HTTP 200, so bot-manager scripts on normal pages do not count); a first HTML response that is a challenge the browser only passes with JavaScript (non-JS crawlers stop there); robots.txt or sitemap that come back as challenge pages (reported as unknown, never as allow-all, with the start of the response as evidence); robots.txt rules per crawler with RFC 9309 matching, read from the plain-text copy the browser gets when available, and with line breaks restored when Fetch's markdown copy lost them (search, AI search, user-triggered and training bots treated differently); noindex and snippet limits; AI crawler user-agents blocked at the CDN; status and redirects; canonical pointing elsewhere; sitemap listing; llms.txt (rated low priority).
 * **Rendering:** share of text that only exists after JavaScript; title, H1, canonical, description or JSON-LD added or changed by JavaScript; query words missing from the raw HTML. Fixes are tailored to the detected stack (Next.js, Nuxt, Angular, SvelteKit, client-only React or Vue, WordPress, site builders).
 * **Extraction:** share of visible text Fetch keeps, sections it drops, thin content compared with competitors, missing title or description (with a drafted description from the page's own text), headings, whether the opening text addresses the query, author and date on articles, image alt text.
 * **Structured data:** invalid JSON-LD, missing JSON-LD (with a pre-filled suggestion), Open Graph tags.
@@ -169,7 +169,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 60 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
+npm test           # 91 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
 npm run typecheck
 ```
 
