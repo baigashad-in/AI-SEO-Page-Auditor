@@ -7,7 +7,7 @@ import { runBrowserStage } from "./stages/browserStage";
 import { runSearchStage } from "./stages/searchStage";
 import { runAgentStage } from "./stages/agentStage";
 import { buildReport } from "./analyze/report";
-import { resolveQuery } from "./analyze/query";
+import { pageSignals, resolveQuery } from "./analyze/query";
 import { parseInputUrl } from "./url";
 
 export interface RunOptions {
@@ -24,7 +24,7 @@ export async function runFullAudit(input: AuditInput, opts: RunOptions = {}): Pr
   log("Fetch + Browser: reading the live page");
   const [fetch, browser] = await Promise.all([runFetchStage(inp), opts.skipBrowser ? Promise.resolve(null) : runBrowserStage(inp)]);
   log(`Fetch: ${fetch.page ? `${fetch.stats?.words ?? 0} words extracted` : `failed (${fetch.pageError?.error})`}`);
-  if (browser) log(`Browser: ${!browser.ok ? `failed (${browser.error})` : browser.challenge ? "got a bot challenge page" : `raw ${browser.raw?.words} words, rendered ${browser.rendered?.words} words`}`);
+  if (browser) log(`Browser: ${!browser.ok ? `failed (${browser.error})` : browser.challenge ? "got a bot challenge page" : browser.rawChallenge ? "first HTML response was a bot challenge; the browser got through" : `raw ${browser.raw?.words} words, rendered ${browser.rendered?.words} words`}`);
 
   const { query, derived } = resolveQuery(inp, fetch, browser);
   log(`Query: "${query}"${derived ? " (derived from the page)" : ""}`);
@@ -36,10 +36,7 @@ export async function runFullAudit(input: AuditInput, opts: RunOptions = {}): Pr
       query,
       queryDerived: derived,
       location: input.location,
-      pageTitle: browser?.rendered?.title ?? fetch.page?.title ?? null,
-      h1: browser?.rendered?.h1[0] ?? null,
-      finalUrl: browser?.finalUrl ?? fetch.page?.finalUrl ?? null,
-      canonical: browser?.rendered?.canonical ?? browser?.raw?.canonical ?? null,
+      ...pageSignals(fetch, browser),
     }),
     opts.skipAgent ? Promise.resolve(null) : runAgentStage(url, query),
   ]);

@@ -84,7 +84,8 @@ export async function runSearchStage(input: SearchStageInput): Promise<SearchSta
     calls,
   };
 
-  // 1. Target query, page 0 then page 1 if the site is not in the top 10.
+  // 1. Target query, page 0 then page 1 if the audited URL itself is not in the top 10 (another URL from
+  // the same site on page 1 does not stop the search: the audited page may still be on page 2).
   for (let page = 0; page < 2; page++) {
     const t = Date.now();
     try {
@@ -102,7 +103,7 @@ export async function runSearchStage(input: SearchStageInput): Promise<SearchSta
       calls.push({ endpoint: "search", purpose: `Rank check for "${query}" (page ${page + 1})`, ms: Date.now() - t, ok: false, detail: (err as Error).message });
       break;
     }
-    if (out.results.some((r) => sameSite(r.url, pageUrl))) break;
+    if (out.results.some((r) => isTarget(r.url))) break;
   }
 
   // Renumber positions to be sequential across pages in case the API restarts at 1.

@@ -3,7 +3,7 @@
 
 import type { AgentStageResult, AuditInput, AuditReport, BrowserStageResult, FetchStageResult, SearchStageResult } from "../types";
 import { buildReport } from "../analyze/report";
-import { resolveQuery } from "../analyze/query";
+import { pageSignals, resolveQuery } from "../analyze/query";
 
 export type StageName = "fetch" | "browser" | "search" | "agent";
 export type StageState = { status: "waiting" | "running" | "done" | "failed" | "skipped"; note?: string };
@@ -66,7 +66,9 @@ export async function runAuditInBrowser(input: AuditInput, opts: ClientOptions):
             ? { status: "failed", note: r.error }
             : r.challenge
               ? { status: "done", note: "got a bot challenge page, not the content" }
-              : { status: "done", note: `raw ${r.raw?.words} / rendered ${r.rendered?.words} words` };
+              : r.rawChallenge
+                ? { status: "done", note: `first HTML response was a bot challenge; rendered ${r.rendered?.words} words` }
+                : { status: "done", note: `raw ${r.raw?.words} / rendered ${r.rendered?.words} words` };
           emit();
           return r;
         },
@@ -90,10 +92,7 @@ export async function runAuditInBrowser(input: AuditInput, opts: ClientOptions):
     query,
     queryDerived: derived,
     location: input.location,
-    pageTitle: browserRes?.rendered?.title ?? fetchRes?.page?.title ?? null,
-    h1: browserRes?.rendered?.h1[0] ?? null,
-    finalUrl: browserRes?.finalUrl ?? fetchRes?.page?.finalUrl ?? null,
-    canonical: browserRes?.rendered?.canonical ?? browserRes?.raw?.canonical ?? null,
+    ...pageSignals(fetchRes, browserRes),
   }).then(
     (r) => {
       progress.search = { status: "done", note: r.target.position ? `#${r.target.position} for "${r.query}"` : `not in top ${r.pagesChecked * 10}` };

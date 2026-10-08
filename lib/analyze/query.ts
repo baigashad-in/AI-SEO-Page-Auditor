@@ -28,6 +28,23 @@ export function deriveQuery(opts: { h1?: string | null; title?: string | null })
   return candidates[0] ? stripBrand(candidates[0]).slice(0, 80) : null;
 }
 
+/**
+ * Title, H1 and URLs that describe the page, for the search stage. A browser that received a bot
+ * challenge has the challenge page's title ("Reddit - Prove your humanity"), so it is ignored.
+ */
+export function pageSignals(
+  fetch: FetchStageResult | null,
+  browser: BrowserStageResult | null,
+): { pageTitle: string | null; h1: string | null; finalUrl: string | null; canonical: string | null } {
+  const br = browser?.challenge ? null : browser;
+  return {
+    pageTitle: br?.rendered?.title ?? fetch?.page?.title ?? null,
+    h1: br?.rendered?.h1[0] ?? null,
+    finalUrl: browser?.finalUrl ?? fetch?.page?.finalUrl ?? null,
+    canonical: br?.rendered?.canonical ?? br?.raw?.canonical ?? null,
+  };
+}
+
 /** The user's query if given, else one derived from the page's H1 or title. */
 export function resolveQuery(
   input: AuditInput,
@@ -35,8 +52,9 @@ export function resolveQuery(
   browser: BrowserStageResult | null,
 ): { query: string; derived: boolean } {
   if (input.query?.trim()) return { query: input.query.trim(), derived: false };
-  const h1 = browser?.rendered?.h1[0] ?? fetch?.stats?.headings.find((h) => h.level === 1)?.text ?? null;
-  const title = fetch?.page?.title ?? browser?.rendered?.title ?? null;
+  const br = browser?.challenge ? null : browser;
+  const h1 = br?.rendered?.h1[0] ?? fetch?.stats?.headings.find((h) => h.level === 1)?.text ?? null;
+  const title = fetch?.page?.title ?? br?.rendered?.title ?? null;
   const q = deriveQuery({ h1, title });
   return { query: q || rootDomain(input.url), derived: true };
 }
