@@ -5,6 +5,7 @@ import type { AuditInput, CallLog, FetchStageResult, FetchedPage, FetchFailure }
 import { tfFetch, TinyFishError, type RawFetchResult } from "../tinyfish";
 import { markdownStats } from "../parse/markdown";
 import { looksLikeRobots, robotsVerdicts } from "../parse/robots";
+import { looksLikeChallengeText } from "../parse/html";
 import { normalizeUrl, originOf, parseInputUrl, sameSite } from "../url";
 
 function unescapeMd(s: string): string {
@@ -29,6 +30,14 @@ function toPage(r: RawFetchResult): FetchedPage {
     imageLinks: r.image_links || [],
     latencyMs: r.latency_ms,
   };
+}
+
+/** A sitemap lists URLs. Anything without URLs (or with challenge markers) is not one. */
+export function looksLikeSitemap(text: string, links: string[]): boolean {
+  if (looksLikeChallengeText(text)) return false;
+  if (/<urlset|<sitemapindex|<loc>/i.test(text)) return true;
+  const urls = text.match(/https?:\/\/[^\s<>"')\]]+/g) || [];
+  return urls.length >= 3 || links.some((l) => /\.xml(\.gz)?$/i.test(l));
 }
 
 function urlInSitemap(text: string, links: string[], pageUrl: string, finalUrl: string): boolean {
@@ -114,18 +123,31 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
   const robotsErr = errFor(robotsUrl);
   const robotsText = robotsRaw?.text ? unescapeMd(String(robotsRaw.text)) : null;
   const finalForRules = result.page?.finalUrl || pageUrl;
-  if (robotsText && looksLikeRobots(robotsText)) {
+  // An HTML page or bot challenge in place of robots.txt means the rules are unknown, not allow-all:
+  // real crawlers may well receive the actual file.
+  const robotsIsHtml =
+    !!robotsText && (robotsRaw?.title != null || /<html|<body|<div/i.test(robotsText) || looksLikeChallengeText(robotsText));
+  if (robotsText && looksLikeRobots(robotsText) && !robotsIsHtml) {
     const v = robotsVerdicts(robotsText, finalForRules);
-    result.robots = { found: true, url: robotsUrl, note: "Parsed with RFC 9309 matching.", verdicts: v.verdicts, sitemaps: v.sitemaps };
+    result.robots = { found: true, url: robotsUrl, note: "Parsed with RFC 9309 matching.", verdicts: v.verdicts, sitemaps: v.sitemaps, status: "parsed" };
   } else {
     const v = robotsVerdicts(null, finalForRules);
-    const note =
-      robotsErr?.error === "page_not_found"
-        ? "No robots.txt (404). All crawlers are allowed by default."
-        : robotsErr
-          ? `Could not read robots.txt (${robotsErr.error}). Crawler rules unknown.`
-          : "robots.txt returned no valid directives (possibly an HTML page). Treated as allow-all.";
-    result.robots = { found: false, url: robotsUrl, note, verdicts: v.verdicts, sitemaps: [] };
+    let status: "absent" | "unreadable" = "unreadable";
+    let note: string;
+    if (robotsErr?.error === "page_not_found") {
+      status = "absent";
+      note = "No robots.txt (404). All crawlers are allowed by default.";
+    } else if (robotsErr) {
+      note = `TinyFish Fetch could not read robots.txt (${robotsErr.error}). Crawler rules unknown.`;
+    } else if (robotsIsHtml) {
+      note = "robots.txt came back as an HTML page (likely a bot challenge), not as rules. Crawler rules unknown.";
+    } else if (!robotsText || !robotsText.trim()) {
+      status = "absent";
+      note = "robots.txt is empty. All crawlers are allowed.";
+    } else {
+      note = "robots.txt has no valid directives. Crawler rules unknown.";
+    }
+    result.robots = { found: false, url: robotsUrl, note, verdicts: v.verdicts, sitemaps: [], status };
   }
 
   // llms.txt (informational only, see findings for why)
@@ -173,6 +195,12 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
     smLinks = guessRaw.links || [];
   }
 
+  // A challenge page or HTML in place of the sitemap must not be read as "page not listed".
+  if (smUrl && smText && !looksLikeSitemap(smText, smLinks)) {
+    smError = looksLikeChallengeText(smText) ? "bot challenge page" : "not a sitemap";
+    smText = "";
+  }
+
   if (smUrl && smText) {
     const finalUrl = result.page?.finalUrl || pageUrl;
     if (urlInSitemap(smText, smLinks, pageUrl, finalUrl)) {
@@ -211,7 +239,14 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
     // A sitemap exists (declared in robots.txt) but could not be read: say so instead of claiming there is none.
     result.sitemap = { checkedUrl: smUrl, containsUrl: null, note: `Sitemap declared in robots.txt (${smUrl}) but Fetch could not read it (${smError || "no content"}). Not checked.` };
   } else {
-    result.sitemap = { checkedUrl: null, containsUrl: null, note: "No sitemap found at /sitemap.xml or in robots.txt." };
+    const guessErr = errFor(sitemapGuess);
+    if (guessErr && guessErr.error !== "page_not_found") {
+      result.sitemap = { checkedUrl: sitemapGuess, containsUrl: null, note: `Could not read /sitemap.xml (${guessErr.error}). Not checked.` };
+    } else if (result.robots.status === "unreadable") {
+      result.sitemap = { checkedUrl: null, containsUrl: null, note: "No /sitemap.xml, and robots.txt could not be read to look for a declared sitemap." };
+    } else {
+      result.sitemap = { checkedUrl: null, containsUrl: null, note: "No sitemap found at /sitemap.xml or in robots.txt." };
+    }
   }
 
   return result;

@@ -24,7 +24,7 @@ export async function runFullAudit(input: AuditInput, opts: RunOptions = {}): Pr
   log("Fetch + Browser: reading the live page");
   const [fetch, browser] = await Promise.all([runFetchStage(inp), opts.skipBrowser ? Promise.resolve(null) : runBrowserStage(inp)]);
   log(`Fetch: ${fetch.page ? `${fetch.stats?.words ?? 0} words extracted` : `failed (${fetch.pageError?.error})`}`);
-  if (browser) log(`Browser: ${browser.ok ? `raw ${browser.raw?.words} words, rendered ${browser.rendered?.words} words` : `failed (${browser.error})`}`);
+  if (browser) log(`Browser: ${!browser.ok ? `failed (${browser.error})` : browser.challenge ? "got a bot challenge page" : `raw ${browser.raw?.words} words, rendered ${browser.rendered?.words} words`}`);
 
   const { query, derived } = resolveQuery(inp, fetch, browser);
   log(`Query: "${query}"${derived ? " (derived from the page)" : ""}`);

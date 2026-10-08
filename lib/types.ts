@@ -93,6 +93,7 @@ export interface FetchStageResult {
     note: string;
     verdicts: RobotsVerdict[];
     sitemaps: string[];
+    status?: "parsed" | "absent" | "unreadable"; // unreadable: a challenge or HTML page came back instead
   };
   llmsTxt: { found: boolean; url: string; chars: number };
   sitemap: { checkedUrl: string | null; containsUrl: boolean | null; note: string };
@@ -145,6 +146,7 @@ export interface BotProbe {
 export interface BrowserStageResult {
   ok: boolean;
   error?: string;
+  challenge?: { title: string | null; words: number } | null; // the browser itself got a bot challenge page
   requestedUrl: string;
   finalUrl: string | null;
   status: number | null;
@@ -268,6 +270,7 @@ export interface AuditReport {
   strengths: string[];
   doToday: string[]; // finding ids, best first
   views: {
+    blockedNote?: string | null; // why the browser word counts are missing (e.g. a bot challenge)
     rawWords: number | null;
     renderedWords: number | null;
     extractedWords: number | null;

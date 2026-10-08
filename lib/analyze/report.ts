@@ -2,9 +2,9 @@
 // connection, findings, and the "do today" list.
 
 import type { AuditReport, CallLog, Scores } from "../types";
-import { buildFindings, buildStrengths, type StageBundle } from "./findings";
+import { agentWasBlocked, blockerPhrase, buildFindings, buildStrengths, locateQuote, usableBrowser, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
-import { quoteAppearsIn, truncate } from "./text";
+import { truncate } from "./text";
 import { rootDomain } from "../url";
 import { AI_BOTS } from "../parse/robots";
 
@@ -12,16 +12,18 @@ function clamp(n: number, lo = 0, hi = 1) {
   return Math.max(lo, Math.min(hi, n));
 }
 
-export function computeScores(b: StageBundle): Scores {
+export function computeScores(input: StageBundle): Scores {
+  const b = usableBrowser(input);
   const f = b.fetch;
   const br = b.browser;
   const s = b.search;
   const parts: { label: string; score: number; max: number }[] = [];
 
   // 1. Crawler access (30)
-  if (f || br) {
+  if (f || br || input.browser?.challenge) {
     let a = 30;
     if (f?.pageError) a -= 30;
+    if (input.browser?.challenge) a -= 10; // AI browsing agents meet the same challenge
     const robotsMeta = [br?.raw?.metaRobots, br?.rendered?.metaRobots, br?.headers.xRobotsTag].join(" ").toLowerCase();
     if (/noindex/.test(robotsMeta)) a -= 30;
     const blocked = f?.robots.verdicts.filter((v) => !v.allowed) ?? [];
@@ -97,15 +99,17 @@ export function computeScores(b: StageBundle): Scores {
         ? "answered"
         : "answered_with_effort";
 
+  const ranks = s?.target.position != null;
   const quadrant: Scores["quadrant"] =
-    visibility === null ? "unknown" : readability >= 60 ? (visibility >= 40 ? "readable_visible" : "readable_invisible") : visibility >= 40 ? "unreadable_visible" : "unreadable_invisible";
+    visibility === null ? "unknown" : readability >= 60 ? (ranks ? "readable_visible" : "readable_invisible") : ranks ? "unreadable_visible" : "unreadable_invisible";
 
   return { readability, visibility, answerability, quadrant, readabilityParts: parts, visibilityParts: vparts };
 }
 
 /** Plain-English lines that tie "can AI read it" to "does it show up". Built only from observed values. */
-export function buildConnection(b: StageBundle, scores: Scores): string[] {
+export function buildConnection(input: StageBundle, scores: Scores): string[] {
   const lines: string[] = [];
+  const b = usableBrowser(input);
   const s = b.search;
   const br = b.browser;
   const f = b.fetch;
@@ -118,7 +122,7 @@ export function buildConnection(b: StageBundle, scores: Scores): string[] {
   switch (scores.quadrant) {
     case "unreadable_visible":
       lines.push(
-        `Visible but hard to read: the page ${pos ? `ranks #${pos}` : "is present"} for "${q}", but scores ${scores.readability}/100 on AI readability. Classic rankings do not carry over to AI answers if the answer engine's crawler cannot read the text, so this is where the fastest gains are.`,
+        `Visible but hard to read: the page ranks #${pos} for "${q}", but scores ${scores.readability}/100 on AI readability. Classic rankings do not carry over to AI answers if the answer engine's crawler cannot read the text, so this is where the fastest gains are.`,
       );
       break;
     case "readable_invisible":
@@ -137,6 +141,13 @@ export function buildConnection(b: StageBundle, scores: Scores): string[] {
     default:
       lines.push(`AI readability: ${scores.readability}/100. Search visibility was not measured in this run.`);
   }
+  const other = pos === null ? s?.domain.urls[0] : undefined;
+  if (other) lines.push(`Another page on the same site ranks #${other.position} for "${q}" instead: ${other.url}.`);
+  if (input.browser?.challenge)
+    lines.push(
+      `A real browser received a bot challenge page${input.browser.challenge.title ? ` ("${input.browser.challenge.title}")` : ""} instead of the content, so AI browsing agents are likely to hit the same wall. Browser-based checks were skipped.`,
+    );
+  if (f?.robots.status === "unreadable") lines.push("robots.txt came back unreadable, so whether AI crawlers are allowed is unknown from this run.");
 
   if (rawW !== null && renW !== null && renW >= 120) {
     const ratio = rawW / renW;
@@ -162,19 +173,25 @@ export function buildConnection(b: StageBundle, scores: Scores): string[] {
     lines.push(`The pages ${pos ? "around" : "ranking for"} this query give AI tools a median of ${median} extractable words (${comps.map((c) => rootDomain(c.url)).join(", ")}); this page gives ${extW}.`);
   }
 
-  const a = b.agent?.answer;
+  const a = input.agent?.answer;
   if (a) {
-    if (!a.answer_found) lines.push(`An AI browsing agent asked "${q}" on the live page could not find an answer${a.missing_information.length ? `; it reported missing: ${a.missing_information.slice(0, 3).join("; ")}` : ""}.`);
-    else if (a.evidence_quote && f?.page) {
-      const inFetch = quoteAppearsIn(a.evidence_quote, markdownToPlain(f.page.markdown));
-      const inRaw = br?.raw ? quoteAppearsIn(a.evidence_quote, br.raw.text) : null;
-      const where = a.answer_location.replace(/_/g, " ");
-      const seenBy = [inFetch ? "fetch tools" : null, inRaw ? "non-JavaScript crawlers" : null].filter(Boolean);
-      const missedBy = [!inFetch ? "fetch tools" : null, inRaw === false ? "non-JavaScript crawlers" : null].filter(Boolean);
+    const where = a.answer_location.replace(/_/g, " ");
+    const loc = locateQuote(input);
+    if (!a.answer_found && agentWasBlocked(a)) {
+      lines.push(`An AI browsing agent asked "${q}" was blocked before it could read the page (${[...new Set(a.blockers.map(blockerPhrase))].join(", ")}).`);
+    } else if (!a.answer_found) {
+      lines.push(`An AI browsing agent asked "${q}" on the live page could not find an answer${a.missing_information.length ? `; it reported missing: ${a.missing_information.slice(0, 3).join("; ")}` : ""}.`);
+    } else if (a.evidence_quote && !loc.verified && a.answer_location === "after_interaction") {
+      lines.push(`An AI browsing agent answered "${q}" only after interacting with the page (${a.interactions_needed.join(", then ") || "clicks"}); that text is not in what fetch tools or non-JavaScript crawlers receive.`);
+    } else if (a.evidence_quote && !loc.verified) {
+      lines.push(`An AI browsing agent answered "${q}" (${where}). Its quote was paraphrased rather than copied from the page, so which crawlers receive that text could not be checked.`);
+    } else if (a.evidence_quote) {
+      const seenBy = [loc.inFetch ? "fetch tools" : null, loc.inRaw ? "non-JavaScript crawlers" : null].filter(Boolean);
+      const missedBy = [loc.inFetch === false ? "fetch tools" : null, loc.inRaw === false ? "non-JavaScript crawlers" : null].filter(Boolean);
       lines.push(
         missedBy.length
           ? `An AI browsing agent answered "${q}" (${where}), but ${missedBy.join(" and ")} never receive that answer${seenBy.length ? `; ${seenBy.join(" and ")} do` : ""}. Answer engines can only quote what they receive.`
-          : `An AI browsing agent answered "${q}" (${where}), and the same answer is in what fetch tools and non-JavaScript crawlers receive.`,
+          : `An AI browsing agent answered "${q}" (${where}), and the same answer is in what ${seenBy.join(" and ") || "crawlers"} receive.`,
       );
     }
   }
@@ -204,8 +221,9 @@ export function buildReport(b: StageBundle, input: { url: string; query?: string
     strengths: buildStrengths(b),
     doToday,
     views: {
-      rawWords: b.browser?.raw?.words ?? null,
-      renderedWords: b.browser?.rendered?.words ?? null,
+      blockedNote: b.browser?.challenge ? `TinyFish Browser received a bot challenge page${b.browser.challenge.title ? ` ("${b.browser.challenge.title}")` : ""}` : null,
+      rawWords: b.browser?.challenge ? null : (b.browser?.raw?.words ?? null),
+      renderedWords: b.browser?.challenge ? null : (b.browser?.rendered?.words ?? null),
       extractedWords: b.fetch?.stats?.words ?? null,
       rawSample: truncate(b.browser?.raw?.text ?? "", 700),
       extractedSample: truncate(extracted, 700),

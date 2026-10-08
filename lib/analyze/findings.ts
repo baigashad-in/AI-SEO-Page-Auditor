@@ -3,6 +3,7 @@
 // a fix the site owner can apply today.
 
 import type {
+  AgentAnswer,
   AgentStageResult,
   BrowserStageResult,
   Finding,
@@ -40,6 +41,16 @@ export function sortFindings(f: Finding[]): Finding[] {
 
 /* Helpers */
 
+/** Query words as the user typed them, for stems computed internally. */
+function shown(query: string, stems: string[]): string {
+  const originals = contentTokens(query);
+  return stems.map((st) => originals.find((w) => stem(w) === st) ?? st).join(", ");
+}
+
+function titleCase(s: string): string {
+  return s.replace(/\b([a-z])/g, (m) => m.toUpperCase());
+}
+
 function pct(a: number, b: number): string {
   return b > 0 ? `${Math.round((a / b) * 100)}%` : "n/a";
 }
@@ -73,6 +84,12 @@ function fitToLength(text: string, max = 155): string {
  * Drafts a meta description. Prefers the agent's own answer to the query (it is a direct answer,
  * which is what a good description is), else the first substantive paragraph of the extracted text.
  */
+/** The agent's answer, only when it answered from the page. */
+function agentSummary(b: StageBundle): string | null {
+  const a = b.agent?.answer;
+  return a?.answer_found && !agentWasBlocked(a) ? a.answer_summary : null;
+}
+
 export function suggestDescription(markdown: string, h1: string | null, agentAnswer?: string | null): string {
   if (agentAnswer && agentAnswer.split(/\s+/).length >= 8) return fitToLength(agentAnswer).replace(/"/g, "'");
   const blocks = markdown.split(/\n\s*\n/).map((b) => b.trim());
@@ -103,7 +120,10 @@ function ssrAdvice(hints: string[]): string {
 function articleLike(b: StageBundle): boolean {
   const r = b.browser?.rendered;
   const types = r?.jsonLd.types.join(" ") || "";
-  return /Article|BlogPosting|NewsArticle/.test(types) || r?.og.type === "article" || /\/(blog|news|article|articles|posts?)\//i.test(pagePath(b.url));
+  if (/Article|BlogPosting|NewsArticle/.test(types)) return true;
+  // JSON-LD that names another type (Person, Product, ProfilePage...) wins over a generic og:type.
+  if (types && /Person|ProfilePage|Product|Organization|WebSite|CollectionPage/.test(types)) return /\/(blog|news|article|articles|posts?)\/.+/i.test(pagePath(b.url));
+  return r?.og.type === "article" || /\/(blog|news|article|articles|posts?)\/.+/i.test(pagePath(b.url));
 }
 
 function guessSchemaType(b: StageBundle): "Article" | "Product" | "WebSite" | "WebPage" {
@@ -120,7 +140,7 @@ function jsonLdSuggestion(b: StageBundle): string {
   const p = b.fetch?.page;
   const url = b.browser?.finalUrl || p?.finalUrl || b.url;
   const title = r?.title || p?.title || "Page title";
-  const desc = r?.metaDescription || p?.description || (p ? suggestDescription(p.markdown, r?.h1[0] ?? null, b.agent?.answer?.answer_summary) : "Short description");
+  const desc = r?.metaDescription || p?.description || (p ? suggestDescription(p.markdown, r?.h1[0] ?? null, agentSummary(b)) : "Short description");
   const image = r?.og.image || p?.imageLinks[0] || undefined;
   const site = rootDomain(url);
   let obj: Record<string, unknown>;
@@ -308,7 +328,7 @@ function accessChecks(b: StageBundle, out: Finding[]) {
     const bad = br.botProbes.filter((p) => p.verdict === "blocked" || p.verdict === "degraded");
     const badSearch = bad.filter((p) => purposeOf(p.bot) !== "training");
     const badTraining = bad.filter((p) => purposeOf(p.bot) === "training");
-    const robotsAllows = f?.robots.verdicts.filter((v) => v.allowed).map((v) => v.bot.token) ?? [];
+    const robotsAllows = f?.robots.status === "unreadable" ? [] : (f?.robots.verdicts.filter((v) => v.allowed).map((v) => v.bot.token) ?? []);
     const evidenceFor = (list: typeof bad) => [
       `Normal browser request: HTTP ${br.status}, ${br.raw?.words ?? 0} words in raw HTML.`,
       ...list.map((p) => `${p.bot} user-agent: HTTP ${p.status ?? "error"}, ${p.words} words${p.challenge ? ", bot challenge page" : ""} (${p.verdict}).`),
@@ -432,7 +452,7 @@ function accessChecks(b: StageBundle, out: Finding[]) {
       fix: { summary: "Add this URL to the sitemap", steps: [`Add <url><loc>${finalUrl}</loc><lastmod>YYYY-MM-DD</lastmod></url>.`], effort: "minutes" },
       sources: ["fetch"],
     });
-  } else if (f && !f.sitemap.checkedUrl) {
+  } else if (f && !f.sitemap.checkedUrl && f.robots.status !== "unreadable") {
     out.push({
       id: "access-no-sitemap",
       category: "access",
@@ -483,7 +503,7 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
         `Raw server HTML: ${raw.words} words. Rendered DOM: ${ren.words} words.`,
         raw.emptyAppShell ? "The raw HTML is an empty app shell (a root div with almost no text)." : "",
         br.onlyAfterJs.headings.length ? `Headings missing from raw HTML: ${br.onlyAfterJs.headings.slice(0, 5).map((h) => `"${h}"`).join(", ")}` : "",
-        termsOnlyAfterJs.length ? `Query words only present after JavaScript: ${termsOnlyAfterJs.join(", ")}` : "",
+        termsOnlyAfterJs.length ? `Query words only present after JavaScript: ${shown(b.query, termsOnlyAfterJs)}` : "",
         raw.frameworkHints.length ? `Detected stack: ${raw.frameworkHints.join(", ")}` : "",
       ].filter(Boolean),
       visibilityImpact:
@@ -497,8 +517,8 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
       category: "rendering",
       severity: "high",
       confidence: "high",
-      title: `Your target words appear only after JavaScript: ${termsOnlyAfterJs.join(", ")}`,
-      evidence: [`Query: "${b.query}"`, `Present in rendered DOM, absent from raw HTML: ${termsOnlyAfterJs.join(", ")}`],
+      title: `Your target words appear only after JavaScript: ${shown(b.query, termsOnlyAfterJs)}`,
+      evidence: [`Query: "${b.query}"`, `Present in rendered DOM, absent from raw HTML: ${shown(b.query, termsOnlyAfterJs)}`],
       visibilityImpact: "Non-rendering AI crawlers will not associate this page with the query.",
       fix: { summary: "Render the section that answers the query on the server", steps: [ssrAdvice(raw.frameworkHints)], effort: "hours" },
       sources: ["browser"],
@@ -614,7 +634,7 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
     });
   }
   if (!f.page.description) {
-    const draft = suggestDescription(md, ren?.h1[0] ?? null, b.agent?.answer?.answer_summary);
+    const draft = suggestDescription(md, ren?.h1[0] ?? null, agentSummary(b));
     out.push({
       id: "meta-description-missing",
       category: "metadata",
@@ -653,7 +673,7 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
         title: "No <h1> on the page",
         evidence: ["Rendered DOM has 0 <h1> elements."],
         visibilityImpact: "The H1 is the strongest on-page statement of the topic for both extractors and ranking.",
-        fix: { summary: "Add one <h1> that states the topic", steps: ["Use the main query words in it."], code: `<h1>${b.query || "Main topic of the page"}</h1>`, effort: "minutes" },
+        fix: { summary: "Add one <h1> that states the topic", steps: ["Use the main query words in it."], code: `<h1>${b.query ? titleCase(b.query) : "Main topic of the page"}</h1>`, effort: "minutes" },
         sources: ["browser"],
       });
     } else if (ren.h1.length > 1) {
@@ -693,21 +713,21 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
         category: "content_gap",
         severity: cov.missing.length >= Math.ceil(cov.terms.length / 2) ? "high" : "medium",
         confidence: "high",
-        title: `Extracted text never mentions: ${cov.missing.join(", ")}`,
-        evidence: [`Query${b.queryDerived ? " (derived from the page)" : ""}: "${b.query}"`, `Found: ${cov.inText.join(", ") || "none"}. Missing: ${cov.missing.join(", ")}.`],
+        title: `Extracted text never mentions: ${shown(b.query, cov.missing)}`,
+        evidence: [`Query${b.queryDerived ? " (derived from the page)" : ""}: "${b.query}"`, `Found: ${shown(b.query, cov.inText) || "none"}. Missing: ${shown(b.query, cov.missing)}.`],
         visibilityImpact: "Retrieval for both search and AI answers starts with matching words and close variants. A page that never uses the query's words is rarely retrieved for it.",
-        fix: { summary: "Use the searcher's words in the heading and first paragraph", steps: [`Work these words in naturally: ${cov.missing.join(", ")}.`], effort: "minutes" },
+        fix: { summary: "Use the searcher's words in the heading and first paragraph", steps: [`Work these words in naturally: ${shown(b.query, cov.missing)}.`], effort: "minutes" },
         sources: ["fetch"],
       });
     } else if (cov.terms.length && cov.inFirstWords.length < Math.ceil(cov.terms.length / 2)) {
-      const draft = b.agent?.answer?.answer_summary;
+      const draft = agentSummary(b);
       out.push({
         id: "content-answer-not-first",
         category: "extraction",
         severity: "medium",
         confidence: "medium",
         title: "The opening text does not address the query",
-        evidence: [`First words AI tools read: "${truncate(s.firstWords, 220)}"`, `Query words in the first 150 words: ${cov.inFirstWords.join(", ") || "none"}`],
+        evidence: [`First words AI tools read: "${truncate(s.firstWords, 220)}"`, `Query words in the first 150 words: ${shown(b.query, cov.inFirstWords) || "none"}`],
         visibilityImpact: "AI answers and featured snippets favor passages that answer directly. If the answer is buried, a competitor's direct answer gets quoted instead.",
         fix: {
           summary: "Add a 40 to 60 word direct answer right under the H1",
@@ -810,11 +830,33 @@ function structuredDataChecks(b: StageBundle, out: Finding[]) {
   }
 }
 
+/** True when the page has a reading problem worth fixing before chasing rankings. */
+function readabilityProblem(b: StageBundle): boolean {
+  if (b.fetch?.pageError || b.browser?.challenge) return true;
+  const raw = b.browser?.raw?.words ?? null;
+  const ren = b.browser?.rendered?.words ?? null;
+  if (raw !== null && ren !== null && ren >= 80 && raw / ren < 0.7) return true;
+  return (b.fetch?.stats?.words ?? 1000) < 120;
+}
+
+/** A domain that holds most of the top results (a brand's own site, a dominant publisher). */
+function dominantDomain(s: SearchStageResult, pageUrl: string): { domain: string; count: number; of: number } | null {
+  const top = s.results.slice(0, 5);
+  const counts = new Map<string, number>();
+  for (const r of top) {
+    const d = rootDomain(r.url);
+    if (d && d !== rootDomain(pageUrl)) counts.set(d, (counts.get(d) || 0) + 1);
+  }
+  const best = [...counts.entries()].sort((a, c) => c[1] - a[1])[0];
+  return best && best[1] >= 3 ? { domain: best[0], count: best[1], of: top.length } : null;
+}
+
 function visibilityChecks(b: StageBundle, out: Finding[]) {
   const s = b.search;
   if (!s || s.pagesChecked === 0) return;
+  const dominant = s.target.position === null ? dominantDomain(s, b.url) : null;
   const depth = s.pagesChecked * 10;
-  const topNames = s.results.slice(0, 3).map((r) => `#${r.position} ${r.siteName || rootDomain(r.url)}`).join(", ");
+  const topNames = s.results.slice(0, 3).map((r) => `#${r.position} ${rootDomain(r.url) || r.siteName}`).join(", ");
 
   if (s.target.position === null) {
     const otherUrl = s.domain.urls[0];
@@ -833,8 +875,30 @@ function visibilityChecks(b: StageBundle, out: Finding[]) {
         ? "Two pages on one site competing for the same query split signals. Search and AI tools pick one, and here it is not the audited page."
         : "AI search tools retrieve candidates from a search index before reading them. A page outside the top results is rarely read, so it is rarely cited.",
       fix: otherUrl
-        ? { summary: "Decide which page should own this query", steps: [`Either merge the content and 301 one URL into the other, or differentiate the topics so each targets a distinct query.`, `Link from ${otherUrl.url} to the audited page with descriptive anchor text if both stay.`], effort: "hours" }
-        : { summary: "Close the gap with the pages that do rank", steps: ["Fix the readability findings first (search engines cannot rank what they cannot read).", "Then cover the missing topics listed under content gaps.", "Get internal links to this page from related pages using the query words as anchor text."], effort: "days" },
+        ? {
+            summary: "Decide which page should own this query",
+            steps: [
+              `If this page should rank, link to it from ${otherUrl.url} using the query words ("${b.query}") as the link text, and make this page answer the query in its first paragraph.`,
+              `If ${otherUrl.url} is the better answer, point your other internal links for this topic there and target this page at a different query.`,
+              "Merge the pages and redirect one to the other (301) only if they say the same thing.",
+            ],
+            effort: "hours",
+          }
+        : {
+            summary: dominant ? `Target a query that ${dominant.domain} does not own, or link to this page from there` : "Close the gap with the pages that do rank",
+            steps: [
+              ...(dominant
+                ? [
+                    `${dominant.count} of the top ${dominant.of} results are on ${dominant.domain}. Search engines treat it as the main source for "${b.query}", so this page is unlikely to outrank it.`,
+                    `Link to this page from ${dominant.domain} if you control it, or aim this page at a narrower query.`,
+                  ]
+                : []),
+              ...(readabilityProblem(b) ? ["Fix the readability findings first (search engines cannot rank what they cannot read)."] : []),
+              "Cover the missing topics listed under content gaps.",
+              "Get internal links to this page from related pages using the query words as anchor text.",
+            ],
+            effort: "days",
+          },
       sources: ["search"],
     });
   } else {
@@ -906,7 +970,8 @@ const GAP_IGNORE = new Set(
     "use using used need needs want good better best many much well first work works working find look thing things " +
     "people important different example examples information learn understand include includes including based provide " +
     "provides able often every without within while however also really simple simply right overview introduction basics " +
-    "next previous related read article page pages site website click step steps way ways time times part"
+    "next previous related read article page pages site website click step steps way ways time times part " +
+    "choose choosing select selecting started getting build building tool tools"
   )
     .split(/\s+/)
     .map(stem),
@@ -972,7 +1037,7 @@ export function topicGaps(
   const singles = [...df.entries()]
     .filter(
       ([term, v]) =>
-        !term.includes(" ") && v.n >= need && term.length >= 5 && clean(term) && !target.has(term) && !covered.has(term) && (headingTerms.get(term) || 0) >= 1,
+        !term.includes(" ") && v.n >= need && term.length >= 5 && clean(term) && !target.has(term) && !covered.has(term) && (headingTerms.get(term) || 0) >= need,
     )
     .sort(byStrength);
   return [...phrases, ...singles].slice(0, limit);
@@ -1055,15 +1120,71 @@ const BLOCKER_PHRASE: Record<string, string> = {
   other: "an obstacle",
 };
 
+export function blockerPhrase(x: { type: string; description: string }): string {
+  if (x.type === "other" && /block|denied|forbidden|security|challenge/i.test(x.description)) return "a block page";
+  return BLOCKER_PHRASE[x.type] || "an obstacle";
+}
+
+// Blocker descriptions that mean the agent never reached the content at all.
+const ACCESS_BLOCK = /block|denied|forbidden|captcha|challenge|security|verify|human|robot|access/i;
+
+export function agentWasBlocked(a: AgentAnswer): boolean {
+  return a.blockers.some(
+    (x) => ["captcha", "login_wall", "paywall", "region_block", "broken_page"].includes(x.type) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
+  );
+}
+
+/** Where the agent's quote can be found. "unverified" means it is not on the page as written (a paraphrase). */
+export function locateQuote(b: StageBundle): { inFetch: boolean | null; inRaw: boolean | null; inRendered: boolean | null; verified: boolean } {
+  const a = b.agent?.answer;
+  const quote = a?.evidence_quote;
+  if (!quote) return { inFetch: null, inRaw: null, inRendered: null, verified: false };
+  const challenged = !!b.browser?.challenge;
+  const extracted = b.fetch?.page ? markdownToPlain(b.fetch.page.markdown) : null;
+  const rawText = challenged ? null : (b.browser?.raw?.text ?? null);
+  const renderedText = challenged ? null : (b.browser?.rendered?.text ?? null);
+  const inFetch = extracted !== null ? quoteAppearsIn(quote, extracted) : null;
+  const inRaw = rawText !== null ? quoteAppearsIn(quote, rawText) : null;
+  const inRendered = renderedText !== null ? quoteAppearsIn(quote, renderedText) : null;
+  return { inFetch, inRaw, inRendered, verified: !!(inFetch || inRaw || inRendered) };
+}
+
+const BLOCKER_FIX: Record<string, string> = {
+  captcha:
+    "Do not challenge readers on content pages. In Cloudflare, allow Verified Bots and signed AI agents, or lower the security level for these paths. Other bot managers have equivalent allow lists.",
+  other:
+    "Check why automated browsers are blocked (bot manager, WAF rule, rate limit). Allow verified AI agents and search crawlers on public content pages.",
+  login_wall: "Keep a public, crawlable summary of the gated content above the login wall.",
+  paywall: "Keep a public summary above the paywall, and mark paywalled sections with isAccessibleForFree: false in JSON-LD.",
+  region_block: "Serve the public content to all regions, or provide a public version that is not geo-blocked.",
+  broken_page: "Fix the error the agent hit, then re-run the audit.",
+  cookie_wall: "Use a cookie banner that sits at the bottom of the screen and does not block reading or replace content in the HTML.",
+  modal: "Delay newsletter or promo pop-ups, or remove them on content pages.",
+  age_gate: "Show the age gate only where legally required, and keep a short public summary visible behind it.",
+};
+
 function answerabilityChecks(b: StageBundle, out: Finding[]) {
   const a = b.agent?.answer;
   if (!a) return;
-  const extracted = b.fetch?.page ? markdownToPlain(b.fetch.page.markdown) : null;
-  const rawText = b.browser?.raw?.text ?? null;
-  const inFetch = a.evidence_quote && extracted !== null ? quoteAppearsIn(a.evidence_quote, extracted) : null;
-  const inRaw = a.evidence_quote && rawText !== null ? quoteAppearsIn(a.evidence_quote, rawText) : null;
+  const blocked = agentWasBlocked(a);
+  const { inFetch, inRaw, inRendered, verified } = locateQuote(b);
 
-  if (!a.answer_found) {
+  if (!a.answer_found && blocked) {
+    // The agent never saw the content: "add this information" advice would be wrong.
+    const blockers = a.blockers.filter((x) => x.type !== "cookie_wall" && x.type !== "modal");
+    out.push({
+      id: "answer-blocked",
+      category: "answerability",
+      severity: "high",
+      confidence: "medium",
+      title: `An AI browsing agent was blocked before it could read the page (${[...new Set(blockers.map(blockerPhrase))].join(", ")})`,
+      evidence: blockers.map((x) => `${x.type.replace(/_/g, " ")}: ${x.description}`),
+      visibilityImpact:
+        "Browsing agents (ChatGPT agent, Claude in Chrome and similar) read pages on a user's behalf. If they are blocked, they answer from other sources and cite those instead.",
+      fix: { summary: "Let AI agents reach public content", steps: [...new Set(blockers.map((x) => BLOCKER_FIX[x.type] || BLOCKER_FIX.other))], effort: "hours" },
+      sources: ["agent"],
+    });
+  } else if (!a.answer_found) {
     out.push({
       id: "answer-not-found",
       category: "answerability",
@@ -1073,20 +1194,46 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
       evidence: [
         `Agent's view of the page: ${a.page_purpose || "n/a"}`,
         a.missing_information.length ? `What it says is missing: ${a.missing_information.join("; ")}` : "",
-        ...a.blockers.map((x) => `Blocker: ${x.type}, ${x.description}`),
       ].filter(Boolean),
       visibilityImpact: "Answer engines cite pages that answer the question. If an agent reading the live page cannot find the answer, it will cite a page that has one.",
       fix: { summary: "Add the missing answer", steps: a.missing_information.length ? a.missing_information.map((m) => `Add: ${m}`) : [`Add a section that directly answers "${b.query}".`], effort: "hours" },
       sources: ["agent"],
     });
-  } else {
+  } else if (a.evidence_quote && !verified && a.answer_location === "after_interaction") {
+    // Content revealed by a click is expected to be missing from the page as loaded. Report it, but
+    // with low confidence: the agent may also have paraphrased.
+    out.push({
+      id: "answer-hidden",
+      category: "answerability",
+      severity: "medium",
+      confidence: "low",
+      title: "The answer appears only after a click, and crawlers never receive it",
+      evidence: [
+        `Agent's evidence: "${truncate(a.evidence_quote, 240)}"`,
+        `Where the agent found it: after interaction${a.interactions_needed.length ? ` (${a.interactions_needed.join(" > ")})` : ""}`,
+        "The text is not in the TinyFish Fetch extraction, the raw server HTML or the page as first loaded. That is expected for content loaded on click; if the agent paraphrased, this can be a false alarm.",
+      ],
+      visibilityImpact: "Only a browsing agent that clicks can reach this answer. Search crawlers and fetch tools quote what is in the HTML they receive.",
+      fix: {
+        summary: "Show the answer by default in the server HTML",
+        steps: [
+          "Render tab or accordion content in the HTML (collapsed with CSS or <details>), not loaded on click.",
+          "Check by opening the page source (view-source:) and searching for a sentence of the answer.",
+        ],
+        code: `<details open>\n  <summary>${truncate(b.query, 80)}</summary>\n  <p>${truncate(a.evidence_quote, 200)}</p>\n</details>`,
+        effort: "hours",
+      },
+      sources: ["agent", "fetch", "browser"],
+    });
+  } else if (a.evidence_quote && verified) {
+    // Only a quote that is really on the page can say who receives it. Paraphrases are skipped.
     const hidden = a.answer_location === "after_interaction";
-    if (a.evidence_quote && (inFetch === false || inRaw === false || hidden)) {
+    if (inFetch === false || inRaw === false || hidden) {
       let severity: Severity = "low";
       let title = "";
       if (inFetch === false && inRaw === false) {
         severity = "high";
-        title = "The answer exists, but neither AI fetch tools nor non-JS crawlers can see it";
+        title = "The answer is on the page, but neither AI fetch tools nor non-JS crawlers receive it";
       } else if (inRaw === false) {
         severity = "medium";
         title = "The answer is only in the page after JavaScript runs";
@@ -1104,13 +1251,15 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
         confidence: "medium",
         title,
         evidence: [
-          `Agent's evidence: "${truncate(a.evidence_quote, 240)}"`,
+          `Agent's evidence (found on the page as written): "${truncate(a.evidence_quote, 240)}"`,
           `Where the agent found it: ${a.answer_location.replace(/_/g, " ")}${a.interactions_needed.length ? ` (${a.interactions_needed.join(" > ")})` : ""}`,
-          `In TinyFish Fetch extraction: ${inFetch === null ? "not checked" : inFetch ? "yes" : "no"}. In raw server HTML: ${inRaw === null ? "not checked" : inRaw ? "yes" : "no"}.`,
+          `In TinyFish Fetch extraction: ${inFetch === null ? "not checked" : inFetch ? "yes" : "no"}. In raw server HTML: ${inRaw === null ? "not checked" : inRaw ? "yes" : "no"}. In rendered page: ${inRendered === null ? "not checked" : inRendered ? "yes" : "no"}.`,
         ],
-        visibilityImpact: "Only a browsing agent that clicks can reach this answer. Search crawlers and fetch tools quote what is in the HTML they receive.",
+        visibilityImpact: hidden
+          ? "Only a browsing agent that clicks can reach this answer. Search crawlers and fetch tools quote what is in the HTML they receive."
+          : "People see this answer, but crawlers and fetch tools work from the HTML they receive, which does not contain it. They cannot quote it.",
         fix: {
-          summary: "Show the answer by default in the server HTML",
+          summary: hidden ? "Show the answer by default in the server HTML" : "Put the answer in the HTML that crawlers receive",
           steps: [
             hidden ? "Render tab or accordion content in the HTML (collapsed with CSS or <details>), not loaded on click." : "",
             inRaw === false ? ssrAdvice(b.browser?.raw?.frameworkHints || []) : "",
@@ -1124,28 +1273,28 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
     }
   }
 
-  const serious = a.blockers.filter((x) => ["login_wall", "paywall", "captcha", "region_block", "broken_page"].includes(x.type));
-  const covering = a.blockers.filter((x) => ["cookie_wall", "modal", "age_gate", "other"].includes(x.type));
-  if (serious.length || covering.length) {
-    out.push({
-      id: "answer-blockers",
-      category: "answerability",
-      severity: serious.length ? "high" : "medium",
-      confidence: "medium",
-      title: `The agent had to get past ${[...new Set([...serious, ...covering].map((x) => BLOCKER_PHRASE[x.type] || "an obstacle"))].join(", ")}`,
-      evidence: [...serious, ...covering].map((x) => `${x.type}: ${x.description}`),
-      visibilityImpact: "Browsing agents (ChatGPT agent, Claude in Chrome and similar) have to get past these to read the page. Each one is a chance to give up and use another source.",
-      fix: {
-        summary: "Do not cover content with overlays",
-        steps: [
-          covering.length ? "Use a cookie banner that sits at the bottom of the screen and does not block reading or replace content in the HTML." : "",
-          covering.some((x) => x.type === "modal") ? "Delay newsletter or promo pop-ups, or remove them on content pages." : "",
-          serious.length ? "Keep a crawlable public summary of gated content above the wall." : "",
-        ].filter(Boolean),
-        effort: "hours",
-      },
-      sources: ["agent"],
-    });
+  // Overlays and walls the agent got past (when it was not fully blocked; that case is reported above).
+  if (!(blocked && !a.answer_found)) {
+    const serious = a.blockers.filter((x) => ["login_wall", "paywall", "captcha", "region_block", "broken_page"].includes(x.type) || (x.type === "other" && ACCESS_BLOCK.test(x.description)));
+    const covering = a.blockers.filter((x) => !serious.includes(x));
+    if (serious.length || covering.length) {
+      const all = [...serious, ...covering];
+      out.push({
+        id: "answer-blockers",
+        category: "answerability",
+        severity: serious.length ? "high" : "medium",
+        confidence: "medium",
+        title: `The agent had to get past ${[...new Set(all.map(blockerPhrase))].join(", ")}`,
+        evidence: all.map((x) => `${x.type.replace(/_/g, " ")}: ${x.description}`),
+        visibilityImpact: "Browsing agents (ChatGPT agent, Claude in Chrome and similar) have to get past these to read the page. Each one is a chance to give up and use another source.",
+        fix: {
+          summary: serious.length ? "Let readers reach the content without a challenge or wall" : "Do not cover content with overlays",
+          steps: [...new Set(all.map((x) => BLOCKER_FIX[x.type] || BLOCKER_FIX.other))],
+          effort: "hours",
+        },
+        sources: ["agent"],
+      });
+    }
   }
 }
 
@@ -1171,26 +1320,76 @@ function stageNotes(b: StageBundle, out: Finding[]) {
   }
 }
 
-export function buildFindings(b: StageBundle): Finding[] {
+/** The browser's HTML is only usable when it is the real page, not a bot challenge. */
+export function usableBrowser(b: StageBundle): StageBundle {
+  return b.browser?.challenge ? { ...b, browser: null } : b;
+}
+
+function challengeChecks(b: StageBundle, out: Finding[]) {
+  const ch = b.browser?.challenge;
+  if (ch) {
+    const fetchGotIt = !!b.fetch?.page && (b.fetch.stats?.words ?? 0) > 100;
+    out.push({
+      id: "access-browser-challenged",
+      category: "access",
+      severity: "high",
+      confidence: "high",
+      title: `A real browser got a bot challenge instead of the page${ch.title ? ` ("${truncate(ch.title, 60)}")` : ""}`,
+      evidence: [
+        `TinyFish Browser received a challenge page: HTTP ${b.browser?.status ?? "n/a"}, ${ch.words} words${ch.title ? `, title "${ch.title}"` : ""}.`,
+        fetchGotIt ? `TinyFish Fetch did receive the content (${b.fetch!.stats!.words} words), so the block depends on how the request looks.` : "",
+        "Checks that need the page HTML (rendering, tags, structured data, crawler user-agent probes) were skipped, because the HTML was the challenge page.",
+        "Caveat: requests came from a TinyFish residential IP. Verified crawlers from published IP ranges may be let through.",
+      ].filter(Boolean),
+      visibilityImpact:
+        "AI browsing agents load pages like a browser. If they get this challenge, they cannot read or cite the page and answer from other sources.",
+      fix: {
+        summary: "Do not challenge readers on public content pages",
+        steps: [BLOCKER_FIX.captcha, "Re-run this audit; the browser should receive the real page."],
+        effort: "hours",
+      },
+      sources: ["browser"],
+    });
+  }
+  if (b.fetch?.robots.status === "unreadable") {
+    out.push({
+      id: "access-robots-unreadable",
+      category: "access",
+      severity: "low",
+      confidence: "medium",
+      title: "robots.txt could not be read, so crawler rules are unknown",
+      evidence: [b.fetch.robots.note, `URL: ${b.fetch.robots.url}`],
+      visibilityImpact:
+        "If real crawlers get the same response, some treat an unreadable robots.txt as a reason to slow down or stop crawling. Real crawlers may receive the actual file.",
+      fix: { summary: "Serve robots.txt to every client without a challenge", steps: ["Exclude /robots.txt and /sitemap.xml from bot challenges and WAF rules.", "Re-run this audit; the crawler rules table should fill in."], effort: "minutes" },
+      sources: ["fetch"],
+    });
+  }
+}
+
+export function buildFindings(input: StageBundle): Finding[] {
   const out: Finding[] = [];
+  const b = usableBrowser(input);
+  challengeChecks(input, out);
   accessChecks(b, out);
   renderingChecks(b, out);
   extractionChecks(b, out);
   structuredDataChecks(b, out);
   visibilityChecks(b, out);
   contentGapChecks(b, out);
-  answerabilityChecks(b, out);
-  stageNotes(b, out);
+  answerabilityChecks(input, out);
+  stageNotes(input, out);
   // De-duplicate by id (first wins) and sort.
   const seen = new Set<string>();
   return sortFindings(out.filter((f) => (seen.has(f.id) ? false : (seen.add(f.id), true))));
 }
 
-export function buildStrengths(b: StageBundle): string[] {
+export function buildStrengths(input: StageBundle): string[] {
   const s: string[] = [];
+  const b = usableBrowser(input);
   const br = b.browser;
   const f = b.fetch;
-  if (f && f.robots.verdicts.filter((v) => v.bot.purpose === "ai_search").every((v) => v.allowed)) s.push("robots.txt allows every AI search crawler checked (OAI-SearchBot, Claude-SearchBot, PerplexityBot, Applebot).");
+  if (f && f.robots.status !== "unreadable" && f.robots.verdicts.filter((v) => v.bot.purpose === "ai_search").every((v) => v.allowed)) s.push("robots.txt allows every AI search crawler checked (OAI-SearchBot, Claude-SearchBot, PerplexityBot, Applebot).");
   if (br?.raw && br.rendered && br.rendered.words > 0 && br.raw.words / br.rendered.words >= 0.9) s.push(`Content is in the server HTML (${br.raw.words} of ${br.rendered.words} words), so non-JavaScript AI crawlers can read it.`);
   const searchProbes = br?.botProbes.filter((p) => AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
   if (searchProbes.length && searchProbes.every((p) => p.verdict === "ok"))

@@ -132,13 +132,13 @@ Each connection line is built from observed numbers, for example "Non-JavaScript
 
 ## What the audit checks
 
-* **Access:** Fetch errors (bot challenge, login wall, empty content); robots.txt rules per crawler with RFC 9309 matching (search, AI search, user-triggered and training bots treated differently); noindex and snippet limits; AI crawler user-agents blocked at the CDN; status and redirects; canonical pointing elsewhere; sitemap listing; llms.txt (rated low priority).
+* **Access:** Fetch errors (bot challenge, login wall, empty content); a real browser receiving a bot challenge page instead of the content (detected even when it returns HTTP 200); robots.txt or sitemap that come back as challenge pages (reported as unknown, never as allow-all); robots.txt rules per crawler with RFC 9309 matching (search, AI search, user-triggered and training bots treated differently); noindex and snippet limits; AI crawler user-agents blocked at the CDN; status and redirects; canonical pointing elsewhere; sitemap listing; llms.txt (rated low priority).
 * **Rendering:** share of text that only exists after JavaScript; title, H1, canonical, description or JSON-LD added or changed by JavaScript; query words missing from the raw HTML. Fixes are tailored to the detected stack (Next.js, Nuxt, Angular, SvelteKit, client-only React or Vue, WordPress, site builders).
 * **Extraction:** share of visible text Fetch keeps, sections it drops, thin content compared with competitors, missing title or description (with a drafted description from the page's own text), headings, whether the opening text addresses the query, author and date on articles, image alt text.
 * **Structured data:** invalid JSON-LD, missing JSON-LD (with a pre-filled suggestion), Open Graph tags.
 * **Visibility:** rank, a different URL of the same site ranking instead, index probe, snippet rewritten away from your description.
 * **Content gaps:** phrases most top-ranking pages use and this page never does; depth and structure compared with them.
-* **Answerability:** the agent could not answer; the answer is hidden behind a click or missing from what crawlers receive; overlays and walls in the way.
+* **Answerability:** the agent could not answer, or was blocked before reading the page; the answer is hidden behind a click or missing from what crawlers receive (checked only when the agent's quote is found on the page as written, so paraphrases never produce findings); overlays and walls in the way.
 
 Every finding lists its evidence, which TinyFish API produced it, a confidence level, why it matters for visibility, and a fix with steps and copy-ready code where it applies.
 
@@ -169,7 +169,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 46 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
+npm test           # 60 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
 npm run typecheck
 ```
 

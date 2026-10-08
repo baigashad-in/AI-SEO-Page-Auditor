@@ -1,7 +1,32 @@
 [
-  { "url": "https://en.wikipedia.org/wiki/Search_engine_optimization", "query": "what is search engine optimization", "why": "Server-rendered reference page: expect high readability" },
-  { "url": "https://react.dev/learn", "query": "learn react", "why": "Docs site built with a JS framework but prerendered" },
-  { "url": "https://www.tinyfish.ai/", "query": "web agent api", "why": "Product homepage: check positioning vs the query" },
-  { "url": "https://docs.tinyfish.ai/fetch-api", "query": "fetch api for ai agents", "why": "Developer docs page" },
-  { "url": "https://www.reddit.com/r/SEO/", "query": "seo subreddit", "why": "Heavily protected site: expect bot blocking findings" }
+  {
+    "url": "https://en.wikipedia.org/wiki/Search_engine_optimization",
+    "query": "what is search engine optimization",
+    "why": "Server-rendered reference page: clean baseline"
+  },
+  {
+    "url": "https://react.dev/learn",
+    "query": "learn react",
+    "why": "Prerendered docs: ranks #1, nothing urgent"
+  },
+  {
+    "url": "https://medium.com/blog",
+    "query": "medium blog",
+    "why": "98% of text after JavaScript, AI search crawlers blocked at the CDN"
+  },
+  {
+    "url": "https://substack.com/@pricingsaas",
+    "query": "pricingsaas newsletter",
+    "why": "Thin page competing with the brand's own domain"
+  },
+  {
+    "url": "https://www.reddit.com/r/SEO/",
+    "query": "seo subreddit",
+    "why": "Browser and agent get a bot challenge; Fetch still reads it"
+  },
+  {
+    "url": "https://www.tinyfish.ai/",
+    "query": "web agent api",
+    "why": "Readable, but a blog post ranks instead of the homepage"
+  }
 ]

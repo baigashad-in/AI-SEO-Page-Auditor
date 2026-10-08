@@ -62,7 +62,11 @@ export async function runAuditInBrowser(input: AuditInput, opts: ClientOptions):
   const browserP: Promise<BrowserStageResult | null> = opts.useBrowser
     ? post<BrowserStageResult>("/api/audit/browser", { url: input.url }).then(
         (r) => {
-          progress.browser = r.ok ? { status: "done", note: `raw ${r.raw?.words} / rendered ${r.rendered?.words} words` } : { status: "failed", note: r.error };
+          progress.browser = !r.ok
+            ? { status: "failed", note: r.error }
+            : r.challenge
+              ? { status: "done", note: "got a bot challenge page, not the content" }
+              : { status: "done", note: `raw ${r.raw?.words} / rendered ${r.rendered?.words} words` };
           emit();
           return r;
         },

@@ -49,6 +49,40 @@ const FRAMEWORKS: [string, RegExp][] = [
   ["Framer", /framerusercontent\.com|data-framer-/],
 ];
 
+// Elements that start a new line when rendered. Text on either side of them must not be glued
+// together ("Sign in" + "The Medium Blog" must not become "Sign inThe Medium Blog").
+const BLOCK_TAGS = new Set(
+  (
+    "address article aside blockquote body br dd details dialog div dl dt fieldset figcaption figure footer form " +
+    "h1 h2 h3 h4 h5 h6 header hgroup hr li main nav ol p pre section summary table tbody td tfoot th thead tr ul " +
+    "button label option select textarea"
+  ).split(" "),
+);
+
+interface DomNode {
+  type: string;
+  data?: string;
+  name?: string;
+  children?: DomNode[];
+}
+
+/** Text of a DOM subtree with spaces at block boundaries. */
+export function blockText(root: unknown): string {
+  const parts: string[] = [];
+  const walk = (node: DomNode) => {
+    if (node.type === "text") {
+      parts.push(node.data ?? "");
+      return;
+    }
+    const block = node.name ? BLOCK_TAGS.has(node.name.toLowerCase()) : false;
+    if (block) parts.push(" ");
+    for (const c of node.children ?? []) walk(c);
+    if (block) parts.push(" ");
+  };
+  if (root) walk(root as DomNode);
+  return parts.join("");
+}
+
 export function frameworkHints(html: string): string[] {
   const head = html.slice(0, 300_000);
   const found = FRAMEWORKS.filter(([, re]) => re.test(head)).map(([n]) => n);
@@ -113,9 +147,16 @@ export function htmlFacts(html: string): HtmlFacts {
     if (text) headings.push({ level: Number(el.tagName.slice(1)), text: text.slice(0, 200) });
   });
 
-  // Visible-ish text: drop non-content nodes. noscript is kept on purpose: a non-JS crawler reads it.
+  // Visible-ish text: drop non-content nodes. noscript is kept on purpose (a non-JS crawler reads it),
+  // but its content arrives as raw markup, so it is parsed and reduced to text first.
+  $("noscript").each((_, el) => {
+    const inner = cheerio.load($(el).text());
+    inner("script, style, iframe, link, meta, img").remove();
+    $(el).replaceWith(` ${inner.root().text()} `);
+  });
   $("script, style, template, svg, iframe, link, meta, head").remove();
-  const bodyText = clean($("body").text()) ?? clean($.root().text()) ?? "";
+  const bodyRoot = $("body")[0] ?? $.root()[0];
+  const bodyText = clean(blockText(bodyRoot)) ?? "";
 
   const rootish = $("#root, #__next, #app, #__nuxt, [data-reactroot]").first();
   const emptyAppShell = rootish.length > 0 && wordCount(rootish.text()) < 20 && wordCount(bodyText) < 80;
@@ -145,21 +186,41 @@ export function htmlFacts(html: string): HtmlFacts {
 }
 
 /** Detects bot-challenge pages (Cloudflare, Akamai, generic captcha) in a response body. */
+const CHALLENGE_MARKERS = [
+  "cf-chl",
+  "challenge-platform",
+  "just a moment...",
+  "attention required! | cloudflare",
+  "access denied",
+  "access to this page has been denied",
+  "captcha",
+  "are you a robot",
+  "verify you are human",
+  "prove your humanity",
+  "you've been blocked",
+  "you have been blocked",
+  "checking your browser",
+  "enable javascript and cookies to continue",
+  "please complete the security check",
+  "request unsuccessful. incapsula",
+  "pardon our interruption",
+  "px-captcha",
+  "_incapsula_resource",
+];
+
+/** Detects bot-challenge pages (Cloudflare, Akamai, PerimeterX, custom) in a response body. */
 export function looksLikeChallenge(html: string, status: number | null): boolean {
-  const h = html.slice(0, 20_000).toLowerCase();
-  const markers = [
-    "cf-chl",
-    "challenge-platform",
-    "just a moment...",
-    "attention required! | cloudflare",
-    "access denied",
-    "captcha",
-    "are you a robot",
-    "request unsuccessful. incapsula",
-    "pardon our interruption",
-    "px-captcha",
-    "_incapsula_resource",
-  ];
   if (status === 403 || status === 429 || status === 503) return true;
-  return markers.some((m) => h.includes(m)) && wordCount(h.replace(/<[^>]+>/g, " ")) < 400;
+  return looksLikeChallengeText(html);
+}
+
+/** Challenge markers in a short page. Long pages that merely mention "captcha" are not challenges. */
+export function looksLikeChallengeText(text: string): boolean {
+  const lower = text.slice(0, 60_000).toLowerCase();
+  if (!CHALLENGE_MARKERS.some((m) => lower.includes(m))) return false;
+  const visible = lower
+    .replace(/<script[\s\S]*?<\/script>/g, " ")
+    .replace(/<style[\s\S]*?<\/style>/g, " ")
+    .replace(/<[^>]+>/g, " ");
+  return wordCount(visible) < 400;
 }

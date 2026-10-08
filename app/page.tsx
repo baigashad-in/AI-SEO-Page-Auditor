@@ -160,7 +160,7 @@ export default function Home() {
 
       <p className="footer-note">
         Uses TinyFish Search and Fetch (free tiers) and Browser and Agent (credits). Audits the live page on every run. Rankings come from TinyFish
-        Search&rsquo;s own index, so treat positions as directional. The API key stays on the server.
+        Search&rsquo;s own index, so treat positions as directional.
       </p>
     </main>
   );

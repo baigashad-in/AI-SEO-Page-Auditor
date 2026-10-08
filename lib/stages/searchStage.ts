@@ -24,13 +24,38 @@ export interface SearchStageInput {
 // Results that are not comparable pages (video and social posts).
 const NON_PAGE = /(^|\.)(youtube\.com|youtu\.be|vimeo\.com|tiktok\.com|instagram\.com|facebook\.com|x\.com|twitter\.com|pinterest\.com|linkedin\.com)$/i;
 
+/**
+ * Search results sometimes arrive as Google redirect links ("/url?q=https://site/page&sa=U...").
+ * Unwrap them so the real URL can be matched, fetched and shown.
+ */
+export function cleanResultUrl(raw: string): string {
+  const u = (raw || "").trim();
+  try {
+    const parsed = new URL(u, "https://www.google.com");
+    if (parsed.pathname === "/url" && /(^|\.)google\./.test(parsed.hostname)) {
+      const target = parsed.searchParams.get("q") || parsed.searchParams.get("url");
+      if (target && /^https?:\/\//i.test(target)) return target;
+    }
+    return /^https?:\/\//i.test(u) ? u : parsed.toString();
+  } catch {
+    return u;
+  }
+}
+
 function toItem(r: RawSearchResult, offset: number): SerpItem {
+  const url = cleanResultUrl(r.url);
+  let host = "";
+  try {
+    host = new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    /* keep empty */
+  }
   return {
     position: (r.position ?? 0) + offset,
     title: r.title ?? "",
-    url: r.url,
+    url,
     snippet: r.snippet ?? "",
-    siteName: r.site_name ?? "",
+    siteName: r.site_name || host,
     date: r.date,
   };
 }

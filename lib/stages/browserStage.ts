@@ -6,7 +6,7 @@
 import { chromium, type Browser, type CDPSession, type Page, type Route } from "playwright-core";
 import type { AuditInput, BotProbe, BrowserStageResult, CallLog, HtmlFacts } from "../types";
 import { tfCreateBrowserSession, tfDeleteBrowserSession, TinyFishError } from "../tinyfish";
-import { htmlFacts, looksLikeChallenge } from "../parse/html";
+import { htmlFacts, looksLikeChallenge, looksLikeChallengeText } from "../parse/html";
 import { normForMatch, wordCount } from "../analyze/text";
 import { parseInputUrl } from "../url";
 
@@ -168,6 +168,10 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
     out.raw = htmlFacts(rawHtml);
     out.rendered = htmlFacts(renderedHtml);
     out.onlyAfterJs = onlyAfterJs(out.raw, out.rendered);
+    // A challenge page can come back with HTTP 200. Detect it so it is never audited as the real page.
+    if (looksLikeChallenge(rawHtml, out.status) || looksLikeChallengeText(renderedHtml)) {
+      out.challenge = { title: out.rendered.title ?? out.raw.title, words: out.rendered.words };
+    }
     calls.push({
       endpoint: "browser",
       purpose: "Load page over CDP: capture raw server HTML, rendered DOM, headers, screenshot",
@@ -177,10 +181,13 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
     });
 
     const t2 = Date.now();
-    // One at a time, on the same tab (see probe()).
+    // One at a time, on the same tab (see probe()). Skipped when the browser itself was challenged:
+    // there is no real page to compare the crawler responses with.
     out.botProbes = [];
-    for (const b of PROBE_BOTS) {
-      out.botProbes.push(await probe(page, out.finalUrl || pageUrl, b, out.raw!.words, out.status));
+    if (!out.challenge) {
+      for (const b of PROBE_BOTS) {
+        out.botProbes.push(await probe(page, out.finalUrl || pageUrl, b, out.raw!.words, out.status));
+      }
     }
     await page.close().catch(() => {});
     calls.push({
@@ -188,7 +195,9 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
       purpose: `Request the page as ${PROBE_BOTS.map((b) => b.bot).join(", ")} (HTML document only) to detect edge blocking`,
       ms: Date.now() - t2,
       ok: true,
-      detail: out.botProbes.map((p) => `${p.bot}: ${p.verdict}`).join(", "),
+      detail: out.challenge
+        ? "skipped: the browser itself received a bot challenge page"
+        : out.botProbes.map((p) => `${p.bot}: ${p.verdict}`).join(", "),
     });
     out.ok = true;
   } catch (err) {
