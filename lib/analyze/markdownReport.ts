@@ -60,7 +60,7 @@ export function reportToMarkdown(r: AuditReport): string {
   out.push(
     "## What each reader sees",
     "",
-    ...(r.views.blockedNote ? [`* ${r.views.blockedNote}; browser word counts are not available.`] : []),
+    ...(r.views.blockedNote ? [`* ${r.views.blockedNote}`] : []),
     `* Raw server HTML (non-JavaScript crawlers): ${r.views.rawWords ?? "n/a"} words`,
     `* Rendered page (browser): ${r.views.renderedWords ?? "n/a"} words`,
     `* AI fetch extraction (TinyFish Fetch): ${r.views.extractedWords ?? "n/a"} words`,

@@ -193,6 +193,6 @@ describe("search results and visibility", () => {
   it("shows query words as typed, not as stems", () => {
     const b = { fetch: fetchStage("# PricingSaaS\n\nPricingSaaS tracks pricing pages."), browser: null, search: null, agent: null, query: "pricingsaas newsletter", queryDerived: false, url: URL_ };
     const f = buildFindings(b).find((x) => x.id === "content-query-terms-missing")!;
-    expect(f.evidence.join(" ")).toContain("Found: pricingsaas.");
+    expect(f.evidence.join(" ")).toContain("In the extracted text: pricingsaas.");
   });
 });

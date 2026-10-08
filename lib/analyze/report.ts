@@ -7,6 +7,7 @@ import { markdownToPlain } from "../parse/markdown";
 import { truncate } from "./text";
 import { rootDomain } from "../url";
 import { AI_BOTS } from "../parse/robots";
+import { withBrowserRobots } from "./robotsSource";
 
 function clamp(n: number, lo = 0, hi = 1) {
   return Math.max(lo, Math.min(hi, n));
@@ -24,6 +25,7 @@ export function computeScores(input: StageBundle): Scores {
     let a = 30;
     if (f?.pageError) a -= 30;
     if (input.browser?.challenge) a -= 10; // AI browsing agents meet the same challenge
+    if (input.browser?.rawChallenge) a -= 10; // crawlers that do not run JavaScript stop at the challenge
     const robotsMeta = [br?.raw?.metaRobots, br?.rendered?.metaRobots, br?.headers.xRobotsTag].join(" ").toLowerCase();
     if (/noindex/.test(robotsMeta)) a -= 30;
     const blocked = f?.robots.verdicts.filter((v) => !v.allowed) ?? [];
@@ -106,6 +108,16 @@ export function computeScores(input: StageBundle): Scores {
   return { readability, visibility, answerability, quadrant, readabilityParts: parts, visibilityParts: vparts };
 }
 
+/** "pricingsaas.com (3 pages), wikipedia.org" instead of repeating a domain once per page. */
+export function domainList(urls: string[]): string {
+  const counts = new Map<string, number>();
+  for (const u of urls) {
+    const d = rootDomain(u) || u;
+    counts.set(d, (counts.get(d) || 0) + 1);
+  }
+  return [...counts.entries()].map(([d, n]) => (n > 1 ? `${d} (${n} pages)` : d)).join(", ");
+}
+
 /** Plain-English lines that tie "can AI read it" to "does it show up". Built only from observed values. */
 export function buildConnection(input: StageBundle, scores: Scores): string[] {
   const lines: string[] = [];
@@ -148,8 +160,13 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
       `A real browser received a bot challenge page${input.browser.challenge.title ? ` ("${input.browser.challenge.title}")` : ""} instead of the content, so AI browsing agents are likely to hit the same wall. Browser-based checks were skipped.`,
     );
   if (f?.robots.status === "unreadable") lines.push("robots.txt came back unreadable, so whether AI crawlers are allowed is unknown from this run.");
+  const rc = input.browser?.rawChallenge;
 
-  if (rawW !== null && renW !== null && renW >= 120) {
+  if (rc && !input.browser?.challenge) {
+    lines.push(
+      `The first HTML response is a bot challenge (${rc.reason}); a browser gets through after JavaScript runs${renW !== null ? ` and sees ${renW} words` : ""}. Crawlers that skip JavaScript (GPTBot, ClaudeBot, PerplexityBot) stop at the challenge, so those engines have nothing to index.`,
+    );
+  } else if (rawW !== null && renW !== null && renW >= 120) {
     const ratio = rawW / renW;
     if (ratio < 0.7)
       lines.push(
@@ -170,7 +187,7 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
   if (comps.length >= 2 && extW !== null) {
     const words = comps.map((c) => c.stats!.words).sort((x, y) => x - y);
     const median = words[Math.floor(words.length / 2)];
-    lines.push(`The pages ${pos ? "around" : "ranking for"} this query give AI tools a median of ${median} extractable words (${comps.map((c) => rootDomain(c.url)).join(", ")}); this page gives ${extW}.`);
+    lines.push(`The pages ${pos ? "around" : "ranking for"} this query give AI tools a median of ${median} extractable words (${domainList(comps.map((c) => c.url))}); this page gives ${extW}.`);
   }
 
   const a = input.agent?.answer;
@@ -200,7 +217,9 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
   return lines;
 }
 
-export function buildReport(b: StageBundle, input: { url: string; query?: string; location?: string }): AuditReport {
+export function buildReport(stages: StageBundle, input: { url: string; query?: string; location?: string }): AuditReport {
+  // Use the plain-text robots.txt from the browser when it parses (see robotsSource.ts).
+  const b = withBrowserRobots(stages);
   const scores = computeScores(b);
   const findings = buildFindings(b);
   const doToday = findings
@@ -221,8 +240,12 @@ export function buildReport(b: StageBundle, input: { url: string; query?: string
     strengths: buildStrengths(b),
     doToday,
     views: {
-      blockedNote: b.browser?.challenge ? `TinyFish Browser received a bot challenge page${b.browser.challenge.title ? ` ("${b.browser.challenge.title}")` : ""}` : null,
-      rawWords: b.browser?.challenge ? null : (b.browser?.raw?.words ?? null),
+      blockedNote: b.browser?.challenge
+        ? `TinyFish Browser received a bot challenge page${b.browser.challenge.title ? ` ("${b.browser.challenge.title}")` : ""}; browser word counts are not available.`
+        : b.browser?.rawChallenge
+          ? "The first HTML response was a bot challenge page, so there is no raw server HTML word count for the real page."
+          : null,
+      rawWords: b.browser?.challenge || b.browser?.rawChallenge ? null : (b.browser?.raw?.words ?? null),
       renderedWords: b.browser?.challenge ? null : (b.browser?.rendered?.words ?? null),
       extractedWords: b.fetch?.stats?.words ?? null,
       rawSample: truncate(b.browser?.raw?.text ?? "", 700),

@@ -111,19 +111,22 @@ export function normForMatch(s: string): string {
     .trim();
 }
 
-/** True when most of the quote's 8-word windows appear in the text. Tolerates small extraction differences. */
+/**
+ * True when the quote is on the page, allowing small edits. Every 3-word run of the quote that also
+ * occurs in the text marks its words as found; the quote counts as present when at least 80% of its
+ * words are found. An agent that adds a label ("Available sections:") or changes punctuation still
+ * matches; a paraphrase in different words does not.
+ */
 export function quoteAppearsIn(quote: string, text: string): boolean {
   const q = normForMatch(quote).split(" ").filter(Boolean);
-  const t = ` ${normForMatch(text)} `;
   if (q.length === 0) return false;
-  if (q.length <= 8) return t.includes(` ${q.join(" ")} `);
-  let hits = 0;
-  let total = 0;
-  for (let i = 0; i + 8 <= q.length; i += 4) {
-    total++;
-    if (t.includes(` ${q.slice(i, i + 8).join(" ")} `)) hits++;
+  const t = ` ${normForMatch(text)} `;
+  if (q.length < 3) return t.includes(` ${q.join(" ")} `);
+  const found = new Array<boolean>(q.length).fill(false);
+  for (let i = 0; i + 3 <= q.length; i++) {
+    if (t.includes(` ${q[i]} ${q[i + 1]} ${q[i + 2]} `)) found[i] = found[i + 1] = found[i + 2] = true;
   }
-  return total > 0 && hits / total >= 0.6;
+  return found.filter(Boolean).length / q.length >= 0.8;
 }
 
 export function firstNWords(text: string, n: number): string {

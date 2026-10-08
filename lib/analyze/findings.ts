@@ -12,7 +12,7 @@ import type {
   Severity,
 } from "../types";
 import { markdownToPlain } from "../parse/markdown";
-import { contentTokens, normForMatch, phraseSet, queryCoverage, quoteAppearsIn, stem, truncate } from "./text";
+import { containsTerm, contentTokens, normForMatch, phraseSet, queryCoverage, quoteAppearsIn, stem, truncate } from "./text";
 import { rootDomain, sameUrl } from "../url";
 import { fetchErrorHelp } from "./fetchErrors";
 import { AI_BOTS } from "../parse/robots";
@@ -49,6 +49,28 @@ function shown(query: string, stems: string[]): string {
 
 function titleCase(s: string): string {
   return s.replace(/\b([a-z])/g, (m) => m.toUpperCase());
+}
+
+/**
+ * The query with each word written the way the page writes it ("pricingsaas" becomes "PricingSaaS"
+ * when the page says "PricingSaaS"). Words the page only has in lower case are capitalized.
+ */
+export function pageCasing(query: string, sources: (string | null | undefined)[]): string {
+  const hay = sources.filter(Boolean).join(" ");
+  return query
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => {
+      const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, "giu");
+      const forms = [...hay.matchAll(re)].map((m) => m[0]).filter((m) => m !== m.toLowerCase());
+      // Mixed case is how the page spells the word. All caps is usually styling ("LEARN REACT" in a
+      // nav), except for short acronyms such as SEO or API.
+      const mixed = forms.find((m) => m !== m.toUpperCase());
+      const acronym = forms.find((m) => m.length <= 4);
+      return mixed ?? acronym ?? titleCase(w.toLowerCase());
+    })
+    .join(" ");
 }
 
 function pct(a: number, b: number): string {
@@ -484,6 +506,9 @@ function accessChecks(b: StageBundle, out: Finding[]) {
 function renderingChecks(b: StageBundle, out: Finding[]) {
   const br = b.browser;
   if (!br?.ok || !br.raw || !br.rendered) return;
+  // The raw HTML was a challenge page, not the server's version of this page: comparing it with the
+  // rendered page would blame JavaScript for what is a bot block (reported by challengeChecks).
+  if (br.rawChallenge) return;
   const raw = br.raw;
   const ren = br.rendered;
   const ratio = ren.words > 0 ? raw.words / ren.words : 1;
@@ -492,7 +517,12 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
   const termsOnlyAfterJs = coverage && rawCoverage ? coverage.inText.filter((t) => !rawCoverage.inText.includes(t)) : [];
 
   if (ren.words >= 80 && ratio < 0.7) {
-    const severity: Severity = ratio < 0.3 ? "critical" : "high";
+    // Severity follows how much text is missing, not only the ratio: 61 missing words on a 107-word
+    // profile page matter less than 1,700 missing words on a blog index.
+    const jsOnlyWords = ren.words - raw.words;
+    const nothingWithoutJs = raw.emptyAppShell || raw.words < 30;
+    const severity: Severity =
+      nothingWithoutJs || (ratio < 0.3 && jsOnlyWords >= 150) ? "critical" : jsOnlyWords >= 150 ? "high" : "medium";
     out.push({
       id: "render-js-dependent-content",
       category: "rendering",
@@ -501,6 +531,7 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
       title: `${pct(ren.words - raw.words, ren.words)} of the page text only appears after JavaScript runs`,
       evidence: [
         `Raw server HTML: ${raw.words} words. Rendered DOM: ${ren.words} words.`,
+        severity === "medium" ? `JavaScript adds ${jsOnlyWords} words, which is a small amount in absolute terms.` : "",
         raw.emptyAppShell ? "The raw HTML is an empty app shell (a root div with almost no text)." : "",
         br.onlyAfterJs.headings.length ? `Headings missing from raw HTML: ${br.onlyAfterJs.headings.slice(0, 5).map((h) => `"${h}"`).join(", ")}` : "",
         termsOnlyAfterJs.length ? `Query words only present after JavaScript: ${shown(b.query, termsOnlyAfterJs)}` : "",
@@ -606,13 +637,19 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
   const compWords = comps.map((c) => c.stats!.words).sort((a, b2) => a - b2);
   const median = compWords.length ? compWords[Math.floor(compWords.length / 2)] : null;
   if (s.words < 300) {
+    // Pages that rank with even less text show that length is not what holds this page back.
+    const notBehind = median !== null && s.words >= median;
     out.push({
       id: "extract-thin",
       category: "extraction",
-      severity: s.words < 120 ? "high" : "medium",
+      severity: s.words < 120 && !notBehind ? "high" : "medium",
       confidence: "high",
       title: `Only ${s.words} words are extractable`,
-      evidence: [`Fetch extracted ${s.words} words.`, median ? `Median for the top ${compWords.length} competing pages: ${median} words.` : ""].filter(Boolean),
+      evidence: [
+        `Fetch extracted ${s.words} words.`,
+        median !== null ? `Median for the top ${compWords.length} competing pages: ${median} words.` : "",
+        notBehind ? "The competing pages are thin too, so length is not what separates them from this page. More specific text still gives AI tools more to quote." : "",
+      ].filter(Boolean),
       visibilityImpact: "AI answers quote specific passages. With little extractable text there is little for an answer engine to cite, and less evidence of relevance for ranking.",
       fix: { summary: "Add substantive, specific text that answers the query", steps: ["Add sections that answer the questions a searcher has (see the agent's missing-information list below if present).", "Use concrete facts: numbers, prices, steps, specs, dates."], effort: "hours" },
       sources: ["fetch"],
@@ -673,7 +710,7 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
         title: "No <h1> on the page",
         evidence: ["Rendered DOM has 0 <h1> elements."],
         visibilityImpact: "The H1 is the strongest on-page statement of the topic for both extractors and ranking.",
-        fix: { summary: "Add one <h1> that states the topic", steps: ["Use the main query words in it."], code: `<h1>${b.query ? titleCase(b.query) : "Main topic of the page"}</h1>`, effort: "minutes" },
+        fix: { summary: "Add one <h1> that states the topic", steps: ["Use the main query words in it."], code: `<h1>${b.query ? pageCasing(b.query, [ren.title, f.page.title, ren.text, extractedText]) : "Main topic of the page"}</h1>`, effort: "minutes" },
         sources: ["browser"],
       });
     } else if (ren.h1.length > 1) {
@@ -696,7 +733,7 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
       category: "extraction",
       severity: "medium",
       confidence: "medium",
-      title: `${s.words} extracted words but only ${s.headings.length} heading(s)`,
+      title: s.headings.length === 0 ? `${s.words} extracted words and no headings` : `${s.words} extracted words but only ${s.headings.length} heading${s.headings.length === 1 ? "" : "s"}`,
       evidence: [`Extracted headings: ${s.headings.map((h) => `"${truncate(h.text, 50)}"`).join(", ") || "none"}`],
       visibilityImpact: "Retrieval systems split pages into passages, usually at headings. Clear H2/H3 sections make it easier to match one passage to one question.",
       fix: { summary: "Add descriptive H2 and H3 headings every 150 to 300 words", steps: ["Phrase some headings as the questions people search for."], effort: "hours" },
@@ -708,15 +745,32 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
   if (b.query) {
     const cov = queryCoverage(b.query, extractedText, s.firstWords, s.headings.map((h) => h.text));
     if (cov.terms.length && cov.missing.length) {
+      // Words that are in the title or description are not "never mentioned": engines read those too.
+      const labels = [f.page.title, f.page.description, ren?.title, ren?.metaDescription, ...(ren?.h1 ?? [])].filter(Boolean).join(" ");
+      const inLabels = cov.missing.filter((t) => containsTerm(labels, t));
+      const nowhere = cov.missing.filter((t) => !inLabels.includes(t));
+      const pos = b.search?.target.position ?? null;
+      const ranksTop3 = pos !== null && pos <= 3;
+      const severity: Severity =
+        ranksTop3 || nowhere.length === 0 ? "low" : nowhere.length >= Math.ceil(cov.terms.length / 2) ? "high" : "medium";
       out.push({
         id: "content-query-terms-missing",
         category: "content_gap",
-        severity: cov.missing.length >= Math.ceil(cov.terms.length / 2) ? "high" : "medium",
+        severity,
         confidence: "high",
-        title: `Extracted text never mentions: ${shown(b.query, cov.missing)}`,
-        evidence: [`Query${b.queryDerived ? " (derived from the page)" : ""}: "${b.query}"`, `Found: ${shown(b.query, cov.inText) || "none"}. Missing: ${shown(b.query, cov.missing)}.`],
+        title: nowhere.length
+          ? `Extracted text never mentions: ${shown(b.query, nowhere)}`
+          : `Query words only in the title or description, not in the text: ${shown(b.query, inLabels)}`,
+        evidence: [
+          `Query${b.queryDerived ? " (derived from the page)" : ""}: "${b.query}"`,
+          `In the extracted text: ${shown(b.query, cov.inText) || "none"}. Missing from the text: ${shown(b.query, cov.missing)}.`,
+          inLabels.length ? `${shown(b.query, inLabels)} ${inLabels.length === 1 ? "is" : "are"} in the title or description.` : "",
+          ranksTop3
+            ? `Already ranks #${pos}, so search engines connect the page to the query through other signals (title, links). Using the words in the text still helps AI tools quote this page for it.`
+            : "",
+        ].filter(Boolean),
         visibilityImpact: "Retrieval for both search and AI answers starts with matching words and close variants. A page that never uses the query's words is rarely retrieved for it.",
-        fix: { summary: "Use the searcher's words in the heading and first paragraph", steps: [`Work these words in naturally: ${shown(b.query, cov.missing)}.`], effort: "minutes" },
+        fix: { summary: "Use the searcher's words in the heading and first paragraph", steps: [`Work these words into the first paragraph naturally: ${shown(b.query, cov.missing)}.`], effort: "minutes" },
         sources: ["fetch"],
       });
     } else if (cov.terms.length && cov.inFirstWords.length < Math.ceil(cov.terms.length / 2)) {
@@ -832,7 +886,7 @@ function structuredDataChecks(b: StageBundle, out: Finding[]) {
 
 /** True when the page has a reading problem worth fixing before chasing rankings. */
 function readabilityProblem(b: StageBundle): boolean {
-  if (b.fetch?.pageError || b.browser?.challenge) return true;
+  if (b.fetch?.pageError || b.browser?.challenge || b.browser?.rawChallenge) return true;
   const raw = b.browser?.raw?.words ?? null;
   const ren = b.browser?.rendered?.words ?? null;
   if (raw !== null && ren !== null && ren >= 80 && raw / ren < 0.7) return true;
@@ -1279,13 +1333,18 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
     const covering = a.blockers.filter((x) => !serious.includes(x));
     if (serious.length || covering.length) {
       const all = [...serious, ...covering];
+      // A banner the agent dismissed before answering from content visible on load is minor.
+      const answeredAnyway = a.answer_found && (a.answer_location === "visible_on_load" || a.answer_location === "after_scroll");
       out.push({
         id: "answer-blockers",
         category: "answerability",
-        severity: serious.length ? "high" : "medium",
+        severity: serious.length ? "high" : answeredAnyway ? "low" : "medium",
         confidence: "medium",
         title: `The agent had to get past ${[...new Set(all.map(blockerPhrase))].join(", ")}`,
-        evidence: all.map((x) => `${x.type.replace(/_/g, " ")}: ${x.description}`),
+        evidence: [
+          ...all.map((x) => `${x.type.replace(/_/g, " ")}: ${x.description}`),
+          !serious.length && answeredAnyway ? "The agent got past it and still answered from content visible on load." : "",
+        ].filter(Boolean),
         visibilityImpact: "Browsing agents (ChatGPT agent, Claude in Chrome and similar) have to get past these to read the page. Each one is a chance to give up and use another source.",
         fix: {
           summary: serious.length ? "Let readers reach the content without a challenge or wall" : "Do not cover content with overlays",
@@ -1351,6 +1410,32 @@ function challengeChecks(b: StageBundle, out: Finding[]) {
       sources: ["browser"],
     });
   }
+  const rc = b.browser?.rawChallenge;
+  if (rc && !ch) {
+    out.push({
+      id: "access-raw-challenge",
+      category: "access",
+      severity: "high",
+      confidence: "high",
+      title: "The first HTML response is a bot challenge; the content only appears after a JavaScript check",
+      evidence: [
+        `First HTML response: HTTP ${b.browser?.status ?? "n/a"}, ${rc.words} words${rc.title ? `, title "${truncate(rc.title, 60)}"` : ""} (${rc.reason}).`,
+        `After JavaScript ran, the browser reached the page: ${b.browser?.rendered?.words ?? 0} words.`,
+        "Crawlers that do not run JavaScript (GPTBot, ClaudeBot, PerplexityBot) stop at the first response.",
+        "Caveat: requests came from a TinyFish residential IP. Verified crawlers from published IP ranges may be let through.",
+      ],
+      visibilityImpact: "An AI crawler that gets the challenge has nothing to index, so the page cannot be retrieved or cited by that engine.",
+      fix: {
+        summary: "Exempt verified crawlers from the JavaScript challenge",
+        steps: [
+          "In Cloudflare, allow Verified Bots and signed AI agents, or skip the JS challenge on public content paths. Other bot managers have equivalent allow lists.",
+          "Re-run this audit; raw and rendered word counts should then be close.",
+        ],
+        effort: "hours",
+      },
+      sources: ["browser"],
+    });
+  }
   if (b.fetch?.robots.status === "unreadable") {
     out.push({
       id: "access-robots-unreadable",
@@ -1358,7 +1443,11 @@ function challengeChecks(b: StageBundle, out: Finding[]) {
       severity: "low",
       confidence: "medium",
       title: "robots.txt could not be read, so crawler rules are unknown",
-      evidence: [b.fetch.robots.note, `URL: ${b.fetch.robots.url}`],
+      evidence: [
+        b.fetch.robots.note,
+        `URL: ${b.fetch.robots.url}`,
+        b.fetch.robots.excerpt ? `What came back starts with: "${truncate(b.fetch.robots.excerpt, 200)}"` : "",
+      ].filter(Boolean),
       visibilityImpact:
         "If real crawlers get the same response, some treat an unreadable robots.txt as a reason to slow down or stop crawling. Real crawlers may receive the actual file.",
       fix: { summary: "Serve robots.txt to every client without a challenge", steps: ["Exclude /robots.txt and /sitemap.xml from bot challenges and WAF rules.", "Re-run this audit; the crawler rules table should fill in."], effort: "minutes" },
