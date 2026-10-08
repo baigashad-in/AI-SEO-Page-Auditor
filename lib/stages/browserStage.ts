@@ -6,7 +6,7 @@
 import { chromium, type Browser, type CDPSession, type Page, type Route } from "playwright-core";
 import type { AuditInput, BotProbe, BrowserStageResult, CallLog, HtmlFacts } from "../types";
 import { tfCreateBrowserSession, tfDeleteBrowserSession, TinyFishError } from "../tinyfish";
-import { htmlFacts, looksLikeChallenge, looksLikeChallengeText } from "../parse/html";
+import { challengeReason, CHALLENGE_MAX_WORDS, htmlFacts } from "../parse/html";
 import { normForMatch, wordCount } from "../analyze/text";
 import { parseInputUrl } from "../url";
 
@@ -72,8 +72,9 @@ export async function probe(
     const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
     const status = resp?.status() ?? null;
     const body = resp ? await resp.text().catch(() => "") : "";
-    const words = wordCount(htmlFacts(body).text);
-    const challenge = looksLikeChallenge(body, status);
+    const facts = htmlFacts(body);
+    const words = facts.words;
+    const challenge = challengeReason(facts, body, status) !== null;
     let verdict: BotProbe["verdict"] = "ok";
     const baselineOk = baselineStatus !== null && baselineStatus < 400;
     if (baselineOk && (challenge || (status !== null && status >= 400))) verdict = "blocked";
@@ -85,6 +86,30 @@ export async function probe(
     if (routed) await page.unroute("**/*", handler).catch(() => {});
     if (cdp) await cdp.detach().catch(() => {});
   }
+}
+
+/** Reads /robots.txt from inside the loaded page (same origin), as plain text with its real line breaks. */
+export async function readRobotsInPage(page: Page, pageUrl: string): Promise<BrowserStageResult["robotsTxt"]> {
+  let url: string;
+  try {
+    url = `${new URL(pageUrl).origin}/robots.txt`;
+  } catch {
+    return null;
+  }
+  // Passed as a string expression: some TypeScript runners wrap functions in helpers the page does not have.
+  const expr = `(async () => {
+    try {
+      const r = await fetch(${JSON.stringify(url)}, { credentials: "omit", cache: "no-store", redirect: "follow" });
+      const text = await r.text();
+      return { url: ${JSON.stringify(url)}, status: r.status, contentType: r.headers.get("content-type"), text: text.slice(0, 200000) };
+    } catch (e) {
+      return { url: ${JSON.stringify(url)}, status: null, contentType: null, text: "", error: String(e).slice(0, 200) };
+    }
+  })()`;
+  return page
+    .evaluate(expr)
+    .then((r) => r as BrowserStageResult["robotsTxt"])
+    .catch((e: Error) => ({ url, status: null, contentType: null, text: "", error: e.message.slice(0, 200) }));
 }
 
 export async function runBrowserStage(input: AuditInput): Promise<BrowserStageResult> {
@@ -169,9 +194,18 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
     out.rendered = htmlFacts(renderedHtml);
     out.onlyAfterJs = onlyAfterJs(out.raw, out.rendered);
     // A challenge page can come back with HTTP 200. Detect it so it is never audited as the real page.
-    if (looksLikeChallenge(rawHtml, out.status) || looksLikeChallengeText(renderedHtml)) {
-      out.challenge = { title: out.rendered.title ?? out.raw.title, words: out.rendered.words };
+    // The rendered page decides: if the browser ends up on real content, it was not stopped, even if the
+    // first HTML response was a challenge that JavaScript solved (non-JS crawlers still get that one).
+    const rawReason = challengeReason(out.raw, rawHtml, out.status);
+    const renderedReason = challengeReason(out.rendered, renderedHtml, null);
+    if (renderedReason || (rawReason && out.rendered.words < CHALLENGE_MAX_WORDS)) {
+      out.challenge = { title: out.rendered.title ?? out.raw.title, words: out.rendered.words, reason: renderedReason ?? rawReason ?? undefined };
+    } else if (rawReason) {
+      out.rawChallenge = { title: out.raw.title, words: out.raw.words, reason: rawReason };
     }
+    // robots.txt as plain text, read from the page's own origin. Fetch returns markdown, which can lose
+    // the line breaks robots.txt depends on; this copy is the file as served to a browser.
+    out.robotsTxt = await readRobotsInPage(page, out.finalUrl || pageUrl);
     calls.push({
       endpoint: "browser",
       purpose: "Load page over CDP: capture raw server HTML, rendered DOM, headers, screenshot",
@@ -181,10 +215,10 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
     });
 
     const t2 = Date.now();
-    // One at a time, on the same tab (see probe()). Skipped when the browser itself was challenged:
-    // there is no real page to compare the crawler responses with.
+    // One at a time, on the same tab (see probe()). Skipped when the browser was challenged, on the
+    // rendered page or in the first HTML response: there is no real page to compare the crawler responses with.
     out.botProbes = [];
-    if (!out.challenge) {
+    if (!out.challenge && !out.rawChallenge) {
       for (const b of PROBE_BOTS) {
         out.botProbes.push(await probe(page, out.finalUrl || pageUrl, b, out.raw!.words, out.status));
       }
@@ -196,7 +230,9 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
       ms: Date.now() - t2,
       ok: true,
       detail: out.challenge
-        ? "skipped: the browser itself received a bot challenge page"
+        ? `skipped: the browser itself received a bot challenge page (${out.challenge.reason})`
+        : out.rawChallenge
+          ? `skipped: the first HTML response was a bot challenge page (${out.rawChallenge.reason})`
         : out.botProbes.map((p) => `${p.bot}: ${p.verdict}`).join(", "),
     });
     out.ok = true;

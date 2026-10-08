@@ -185,42 +185,83 @@ export function htmlFacts(html: string): HtmlFacts {
   };
 }
 
-/** Detects bot-challenge pages (Cloudflare, Akamai, generic captcha) in a response body. */
-const CHALLENGE_MARKERS = [
-  "cf-chl",
-  "challenge-platform",
-  "just a moment...",
-  "attention required! | cloudflare",
+// Bot challenge and block pages.
+//
+// Phrases are matched against the decoded title and visible text of the WHOLE page, never against
+// scripts or a slice of the markup. Ordinary pages carry bot-manager code that mentions these words
+// (Cloudflare adds a /cdn-cgi/challenge-platform/ detection script to normal pages, sign-in forms ship
+// reCAPTCHA config), and a long <head> can push the real <title> past any fixed slice. Matching markup
+// that way flagged Wikipedia and Medium as challenges and missed Reddit's "Prove your humanity" page.
+const CHALLENGE_PHRASES = [
+  "just a moment",
+  "attention required",
   "access denied",
   "access to this page has been denied",
-  "captcha",
   "are you a robot",
+  "not a robot",
   "verify you are human",
+  "verifying you are human",
+  "verify that you are human",
   "prove your humanity",
   "you've been blocked",
   "you have been blocked",
   "checking your browser",
+  "checking if the site connection is secure",
   "enable javascript and cookies to continue",
   "please complete the security check",
-  "request unsuccessful. incapsula",
+  "complete the challenge",
+  "request unsuccessful",
   "pardon our interruption",
-  "px-captcha",
-  "_incapsula_resource",
+  "press & hold",
+  "press and hold",
+  "unusual traffic",
+  "blocked by network security",
+  "solve the captcha",
+  "complete the captcha",
+  "enter the characters you see",
 ];
 
-/** Detects bot-challenge pages (Cloudflare, Akamai, PerimeterX, custom) in a response body. */
-export function looksLikeChallenge(html: string, status: number | null): boolean {
-  if (status === 403 || status === 429 || status === 503) return true;
-  return looksLikeChallengeText(html);
+// Markup that only the challenge or block page itself carries (Cloudflare challenge and error pages,
+// PerimeterX, DataDome). Not the detection scripts that run on normal pages.
+const CHALLENGE_MARKUP = ["cf_chl_", "cf-browser-verification", 'id="challenge-form"', "px-captcha", "captcha-delivery.com", "cf-error-details"];
+
+/** Challenge pages are short. A page with this many visible words is real content, whatever it mentions. */
+export const CHALLENGE_MAX_WORDS = 400;
+
+function normChallenge(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u02bc]/g, "'")
+    .replace(/[\s\u00a0]+/g, " ");
 }
 
-/** Challenge markers in a short page. Long pages that merely mention "captcha" are not challenges. */
-export function looksLikeChallengeText(text: string): boolean {
-  const lower = text.slice(0, 60_000).toLowerCase();
-  if (!CHALLENGE_MARKERS.some((m) => lower.includes(m))) return false;
-  const visible = lower
-    .replace(/<script[\s\S]*?<\/script>/g, " ")
-    .replace(/<style[\s\S]*?<\/style>/g, " ")
-    .replace(/<[^>]+>/g, " ");
-  return wordCount(visible) < 400;
+/**
+ * Why this response looks like a bot challenge or block page, or null when it looks like real content.
+ * Works on facts already extracted by htmlFacts (decoded title, visible text, word count of the whole body).
+ */
+export function challengeReason(
+  facts: { title: string | null; text: string; words: number },
+  html = "",
+  status: number | null = null,
+): string | null {
+  if (facts.words >= CHALLENGE_MAX_WORDS) return null;
+  if (status === 401 || status === 403 || status === 429 || status === 503) return `HTTP ${status}`;
+  const visible = normChallenge(`${facts.title ?? ""} ${facts.text.slice(0, 4000)}`);
+  const phrase = CHALLENGE_PHRASES.find((p) => visible.includes(p));
+  if (phrase) return `the page says "${phrase}"`;
+  const lowerHtml = html.toLowerCase();
+  const mark = CHALLENGE_MARKUP.find((m) => lowerHtml.includes(m));
+  if (mark) return `challenge markup (${mark})`;
+  return null;
+}
+
+/** HTML response body in, true when it is a challenge or block page. */
+export function looksLikeChallenge(html: string, status: number | null): boolean {
+  return challengeReason(htmlFacts(html), html, status) !== null;
+}
+
+/** Plain text (for example what Fetch returned for robots.txt or a sitemap) that is a challenge page. */
+export function looksLikeChallengeText(text: string, title: string | null = null): boolean {
+  const visible = text.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
+  return challengeReason({ title, text: visible, words: wordCount(visible) }, text) !== null;
 }

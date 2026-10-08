@@ -94,6 +94,9 @@ export interface FetchStageResult {
     verdicts: RobotsVerdict[];
     sitemaps: string[];
     status?: "parsed" | "absent" | "unreadable"; // unreadable: a challenge or HTML page came back instead
+    source?: "fetch" | "browser"; // browser: the plain-text copy read through TinyFish Browser
+    excerpt?: string; // start of what came back, kept as evidence when the file could not be parsed
+    reflowed?: boolean; // line breaks were missing and the rules were reconstructed
   };
   llmsTxt: { found: boolean; url: string; chars: number };
   sitemap: { checkedUrl: string | null; containsUrl: boolean | null; note: string };
@@ -146,7 +149,12 @@ export interface BotProbe {
 export interface BrowserStageResult {
   ok: boolean;
   error?: string;
-  challenge?: { title: string | null; words: number } | null; // the browser itself got a bot challenge page
+  challenge?: { title: string | null; words: number; reason?: string } | null; // the browser itself got a bot challenge page
+  // The first HTML response was a challenge, but the browser got through after JavaScript ran.
+  // Crawlers that do not run JavaScript stop at that first response.
+  rawChallenge?: { title: string | null; words: number; reason: string } | null;
+  // robots.txt read as plain text from inside the page (same origin). Null when not attempted.
+  robotsTxt?: { url: string; status: number | null; contentType: string | null; text: string; error?: string } | null;
   requestedUrl: string;
   finalUrl: string | null;
   status: number | null;
