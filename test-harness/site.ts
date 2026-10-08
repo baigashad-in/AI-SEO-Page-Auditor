@@ -65,7 +65,32 @@ ${extra}
 </article></main><footer>Footer links</footer></body></html>`;
 }
 
+// A bot challenge served with HTTP 200, shaped like Reddit's: a large inline <style> pushes <title>
+// past the first 60,000 characters, and the text uses entities.
+const challengePage = `<!doctype html><html><head><style>${".c{color:#111;margin:0}".repeat(4000)}</style>
+<title>Example - Prove your humanity</title></head><body><main><h1>Prove&nbsp;your humanity</h1>
+<p>We&#8217;re committed to safety and security. But not for bots. Complete the challenge below.</p></main></body></html>`;
+
+// A JavaScript app shell, shaped like Medium's blog page: few words in the server HTML, a reCAPTCHA
+// script, and the Cloudflare detection script reference that ordinary pages carry. Not a challenge.
+const blogShell = `<!doctype html><html><head><title>Example Blog</title>
+<script src="https://www.google.com/recaptcha/api.js" async></script></head>
+<body><nav>Open in app Sign up Sign in Write Search</nav><h2>The Example Blog</h2><p>3.4M followers, 5+ editors</p>
+<div id="feed"></div>
+<script>(function(){var a=document.createElement("script");a.src="/cdn-cgi/challenge-platform/scripts/jsd/main.js";document.head.appendChild(a);})();</script>
+<script>document.getElementById("feed").innerHTML=Array.from({length:12},function(_,i){return "<article><h2>Product update "+(i+1)+"</h2><p>"+
+"We shipped a new way to follow writers, better stats pages for authors, and a faster editor that keeps drafts in sync across devices. ".repeat(3)+"</p></article>";}).join("");</script>
+</body></html>`;
+
 const pages: Record<string, Record<string, { type: string; body: string }>> = {
+  "verify.audit-demo.example": {
+    "/r/seo/": { type: "text/html", body: challengePage },
+    "/robots.txt": { type: "text/plain", body: "# Example robots.txt\nUser-agent: *\nDisallow: /\n" },
+  },
+  "blog.audit-demo.example": {
+    "/blog": { type: "text/html", body: blogShell },
+    "/robots.txt": { type: "text/plain", body: "User-agent: *\nAllow: /\n" },
+  },
   [TARGET]: {
     "/pricing": { type: "text/html", body: pricingShell },
     "/static/js/main.1a2b3c.js": { type: "application/javascript", body: appJs },
