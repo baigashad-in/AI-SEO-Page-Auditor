@@ -147,13 +147,21 @@ export async function pollAgentStage(runId: string, query: string): Promise<Agen
 }
 
 /** Server-side helper for the CLI: start, poll until done or timeout, cancel on timeout. */
-export async function runAgentStage(url: string, query: string, timeoutMs = 240_000): Promise<AgentStageResult> {
+export async function runAgentStage(
+  url: string,
+  query: string,
+  timeoutMs = 240_000,
+  onStatus?: (status: string) => void, // called when the run's status changes (QUEUED, RUNNING, ...)
+): Promise<AgentStageResult> {
   const started = await startAgentStage(url, query);
   if (!started.runId) return { ok: false, runId: null, status: "NOT_STARTED", error: started.error, query, answer: null, calls: started.calls };
   const deadline = Date.now() + timeoutMs;
+  let last = "";
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5000));
     const res = await pollAgentStage(started.runId, query);
+    if (onStatus && res.status !== last) onStatus(res.status);
+    last = res.status;
     if (["COMPLETED", "FAILED", "CANCELLED"].includes(res.status)) return { ...res, calls: [...started.calls, ...res.calls] };
   }
   await tfCancelAgentRun(started.runId);

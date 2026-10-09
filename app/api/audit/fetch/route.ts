@@ -1,6 +1,7 @@
 import { runFetchStage } from "@/lib/stages/fetchStage";
 import { errorResponse, guard, readJson } from "@/lib/server/guard";
 import { parseInputUrl } from "@/lib/url";
+import { fetchSummary, serverLog, track } from "@/lib/progress";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +13,7 @@ export async function POST(req: Request) {
   const body = await readJson<{ url?: string; query?: string; location?: string }>(req);
   try {
     const url = parseInputUrl(body?.url || "").toString();
-    return Response.json(await runFetchStage({ url, query: body?.query, location: body?.location }));
+    return Response.json(await track("Fetch", () => runFetchStage({ url, query: body?.query, location: body?.location }), serverLog, { subject: url, summary: fetchSummary }));
   } catch (err) {
     return errorResponse(err);
   }
