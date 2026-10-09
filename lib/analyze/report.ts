@@ -5,7 +5,7 @@ import type { AuditReport, CallLog, Scores } from "../types";
 import { agentWasBlocked, blockerPhrase, buildFindings, buildStrengths, locateQuote, usableBrowser, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
 import { truncate } from "./text";
-import { rootDomain } from "../url";
+import { displayUrl, rootDomain } from "../url";
 import { AI_BOTS } from "../parse/robots";
 import { withBrowserRobots } from "./robotsSource";
 
@@ -154,7 +154,7 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
       lines.push(`AI readability: ${scores.readability}/100. Search visibility was not measured in this run.`);
   }
   const other = pos === null ? s?.domain.urls[0] : undefined;
-  if (other) lines.push(`Another page on the same site ranks #${other.position} for "${q}" instead: ${other.url}.`);
+  if (other) lines.push(`Another page on the same site ranks #${other.position} for "${q}" instead: ${displayUrl(other.url)}.`);
   if (input.browser?.challenge)
     lines.push(
       `A real browser received a bot challenge page${input.browser.challenge.title ? ` ("${input.browser.challenge.title}")` : ""} instead of the content, so AI browsing agents are likely to hit the same wall. Browser-based checks were skipped.`,

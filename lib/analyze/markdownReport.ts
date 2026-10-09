@@ -1,6 +1,12 @@
 // Markdown export of a report, for sharing with a developer or pasting into a ticket.
 
 import type { AuditReport, Finding } from "../types";
+import { oneLineError } from "../url";
+
+/** Text safe inside a Markdown table cell: one line, no column separators. */
+function cell(s: string): string {
+  return s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
+}
 
 const SEV_LABEL: Record<Finding["severity"], string> = {
   critical: "CRITICAL",
@@ -69,7 +75,7 @@ export function reportToMarkdown(r: AuditReport): string {
     "",
     "| Endpoint | Purpose | Time | Result |",
     "| :- | :- | -: | :- |",
-    ...r.calls.map((c) => `| ${c.endpoint} | ${c.purpose.replace(/\|/g, "/")} | ${(c.ms / 1000).toFixed(1)}s | ${c.ok ? "ok" : "failed"}${c.detail ? `: ${c.detail.replace(/\|/g, "/")}` : ""} |`),
+    ...r.calls.map((c) => `| ${c.endpoint} | ${cell(c.purpose)} | ${(c.ms / 1000).toFixed(1)}s | ${c.ok ? "ok" : "failed"}${c.detail ? `: ${cell(oneLineError(c.detail, 300))}` : ""} |`),
     "",
   );
   return out.join("\n");

@@ -81,8 +81,16 @@ Command line and batch demo:
 
 ```bash
 npm run audit -- https://example.com/pricing --query "pricing for small teams"
-npm run demo       # audits every page in demo-pages.json, writes demo-reports/index.md
+# saves reports/ai-audit-<page>-<run time>.md and .json
+
+npm run demo
+# audits every page in demo-pages.json and saves demo-reports/<run time>/:
+# one .md and one .json per page, plus index.md comparing them
 ```
+
+Both commands print each stage as it starts and finishes, plus a "still running" line every 15 seconds; a page usually takes 1 to 3 minutes, mostly the Agent. The web app prints the same `[audit]` lines in the terminal where `npm run dev` runs, while the page shows progress for each stage.
+
+Run times in file names are UTC (for example `2026-10-09-103012`) and match `generatedAt` in the JSON. The web app's download buttons use the same names.
 
 ## Architecture
 
@@ -169,7 +177,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 91 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
+npm test           # 107 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
 npm run typecheck
 ```
 

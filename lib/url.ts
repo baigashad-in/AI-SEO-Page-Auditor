@@ -64,6 +64,40 @@ export function sameSite(a: string, b: string): boolean {
 }
 
 /** File-name-safe slug for a URL, e.g. "example-com-blog-post". */
+/**
+ * The URL to report for a page that Fetch or a browser ended on. When only the query string changed
+ * (Reddit's "?solution=...&js_challenge=1&jsc_token=..." challenge redirect, tracking parameters),
+ * the requested URL is the page; the extra parameters must not end up in robots.txt rules or canonicals.
+ */
+export function pageUrlAfterRedirect(requested: string, final: string | null | undefined): string {
+  if (!final) return requested;
+  try {
+    const a = new URL(requested);
+    const b = new URL(final);
+    const path = (u: URL) => u.pathname.replace(/\/+$/, "") || "/";
+    return a.origin === b.origin && path(a) === path(b) ? requested : final;
+  } catch {
+    return final;
+  }
+}
+
+/** A URL short enough to read in a report: a long query string (share and tracking parameters) becomes "?…". */
+export function displayUrl(u: string, maxQuery = 40): string {
+  try {
+    const x = new URL(u);
+    const q = x.search.length > maxQuery ? "?\u2026" : x.search;
+    return `${x.origin}${x.pathname}${q}`;
+  } catch {
+    return u;
+  }
+}
+
+/** Error text on one line, without terminal color codes or Playwright's multi-line call log. */
+export function oneLineError(msg: string, max = 200): string {
+  const first = msg.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/)[0].trim();
+  return first.length > max ? first.slice(0, max - 1) + "\u2026" : first;
+}
+
 /** "2026-10-09-103012" (UTC) from an ISO time, so saved files sort by run time and old runs are easy to spot. */
 export function stampForFile(iso: string): string {
   const d = new Date(iso);

@@ -153,6 +153,7 @@ export interface BrowserStageResult {
   // The first HTML response was a challenge, but the browser got through after JavaScript ran.
   // Crawlers that do not run JavaScript stop at that first response.
   rawChallenge?: { title: string | null; words: number; reason: string } | null;
+  slowLoad?: boolean; // the DOM was still not ready after the wait; the report uses what had loaded
   // robots.txt read as plain text from inside the page (same origin). Null when not attempted.
   robotsTxt?: { url: string; status: number | null; contentType: string | null; text: string; error?: string } | null;
   requestedUrl: string;

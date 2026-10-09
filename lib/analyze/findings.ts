@@ -13,7 +13,7 @@ import type {
 } from "../types";
 import { markdownToPlain } from "../parse/markdown";
 import { containsTerm, contentTokens, normForMatch, phraseSet, queryCoverage, quoteAppearsIn, stem, truncate } from "./text";
-import { rootDomain, sameUrl } from "../url";
+import { displayUrl, oneLineError, rootDomain, sameUrl } from "../url";
 import { fetchErrorHelp } from "./fetchErrors";
 import { AI_BOTS } from "../parse/robots";
 
@@ -92,7 +92,8 @@ const BOILERPLATE = /redirects here|from wikipedia|please help|this article|lear
 function fitToLength(text: string, max = 155): string {
   const t = text.replace(/\s+/g, " ").trim();
   if (t.length <= max) return t;
-  const sentences = t.match(/[^.!?]+[.!?]/g) || [];
+  // A sentence ends at . ! or ? followed by a space or the end, so "No.1", "3.4M" and "v2.0" stay whole.
+  const sentences = t.match(/.+?[.!?](?=\s|$)/g) || [];
   let out = "";
   for (const s of sentences) {
     const next = (out + " " + s.trim()).trim();
@@ -109,7 +110,8 @@ function fitToLength(text: string, max = 155): string {
 /** The agent's answer, only when it answered from the page. */
 function agentSummary(b: StageBundle): string | null {
   const a = b.agent?.answer;
-  return a?.answer_found && !agentWasBlocked(a) ? a.answer_summary : null;
+  // An agent that answered read the page, even if it had to get past a block first (Reddit).
+  return a?.answer_found ? a.answer_summary : null;
 }
 
 export function suggestDescription(markdown: string, h1: string | null, agentAnswer?: string | null): string {
@@ -250,13 +252,25 @@ function accessChecks(b: StageBundle, out: Finding[]) {
           : []),
         ...ownGroup.map((v) => `# In the existing "User-agent: ${v.matchedGroup}" group, remove or narrow:\n#   ${v.matchedRule}\n# or add this more specific rule to that group:\nAllow: ${path}`),
       ].join("\n");
+      // A page that robots.txt closes to Googlebot but that ranks or is indexed anyway: the site likely
+      // serves verified crawlers a different robots.txt (or has an agreement with them), or the rule is
+      // newer than the index. The file is real, but what it means for search is uncertain.
+      const pos = b.search?.target.position ?? null;
+      const indexedAnyway = classic && (pos !== null || !!b.search?.indexProbe.found);
       out.push({
         id: "access-robots-search-blocked",
         category: "access",
-        severity: classic || blockedSearch.length >= 2 ? "critical" : "high",
-        confidence: "high",
+        severity: indexedAnyway ? "high" : classic || blockedSearch.length >= 2 ? "critical" : "high",
+        confidence: indexedAnyway ? "low" : "high",
         title: `robots.txt blocks ${blockedSearch.map((v) => v.bot.token).join(", ")} from this URL`,
-        evidence: blockedSearch.map((v) => `${v.bot.token} (${v.bot.operator}): blocked by "${v.matchedRule}" in group "User-agent: ${v.matchedGroup}". ${v.bot.note}`),
+        evidence: [
+          ...blockedSearch.map((v) => `${v.bot.token} (${v.bot.operator}): blocked by "${v.matchedRule}" in group "User-agent: ${v.matchedGroup}". ${v.bot.note}`),
+          ...(indexedAnyway
+            ? [
+                `Yet the page ${pos !== null ? `ranks #${pos} for "${b.search!.query}"` : "is in the search index"}, so search engines still reach it. This is the robots.txt served to TinyFish; the site may serve verified crawlers a different one, have agreements with some engines, or have added the rule after the page was indexed.`,
+              ]
+            : []),
+        ],
         visibilityImpact:
           "OpenAI states that sites opted out of OAI-SearchBot are not shown in ChatGPT search answers; Anthropic and Perplexity describe the same for their search crawlers. Blocking Googlebot or Bingbot removes the page from classic search and from AI Overviews or Copilot.",
         fix: { summary: "Allow search crawlers on this path (skip if the block is intentional)", steps: ["Edit robots.txt as shown.", "Re-run the audit; the robots table should show these bots as allowed."], code, effort: "minutes" },
@@ -922,7 +936,7 @@ function visibilityChecks(b: StageBundle, out: Finding[]) {
       title: otherUrl ? `A different URL from your site ranks for "${s.query}" (#${otherUrl.position})` : `Not in the top ${depth} for "${s.query}"`,
       evidence: [
         `TinyFish Search (${s.location}) top results: ${topNames || "none"}.`,
-        otherUrl ? `Your ranking URL: ${otherUrl.url}` : `No URL from ${rootDomain(b.url)} in the top ${depth}.`,
+        otherUrl ? `Your ranking URL: ${displayUrl(otherUrl.url)}` : `No URL from ${rootDomain(b.url)} in the top ${depth}.`,
         b.queryDerived ? "Query was derived from the page title/H1. Re-run with the query you actually target for a sharper result." : "",
       ].filter(Boolean),
       visibilityImpact: otherUrl
@@ -932,8 +946,8 @@ function visibilityChecks(b: StageBundle, out: Finding[]) {
         ? {
             summary: "Decide which page should own this query",
             steps: [
-              `If this page should rank, link to it from ${otherUrl.url} using the query words ("${b.query}") as the link text, and make this page answer the query in its first paragraph.`,
-              `If ${otherUrl.url} is the better answer, point your other internal links for this topic there and target this page at a different query.`,
+              `If this page should rank, link to it from ${displayUrl(otherUrl.url)} using the query words ("${b.query}") as the link text, and make this page answer the query in its first paragraph.`,
+              `If ${displayUrl(otherUrl.url)} is the better answer, point your other internal links for this topic there and target this page at a different query.`,
               "Merge the pages and redirect one to the other (301) only if they say the same thing.",
             ],
             effort: "hours",
@@ -1294,24 +1308,33 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
       } else if (inFetch === false) {
         severity = "medium";
         title = "The answer is in the HTML, but AI extraction drops it";
+
       } else {
         severity = "low";
         title = "The answer is readable by crawlers but hidden from people behind a click";
       }
+      // A few words (a tagline, a heading) are weak evidence of where "the answer" lives, and
+      // extractors often drop taglines on purpose.
+      const quoteWords = a.evidence_quote.split(/\s+/).filter(Boolean).length;
+      const shortQuote = quoteWords < 8;
+      if (shortQuote && severity !== "low") severity = severity === "high" ? "medium" : "low";
       out.push({
         id: "answer-hidden",
         category: "answerability",
         severity,
-        confidence: "medium",
+        confidence: shortQuote ? "low" : "medium",
         title,
         evidence: [
           `Agent's evidence (found on the page as written): "${truncate(a.evidence_quote, 240)}"`,
+          shortQuote ? `The quote is only ${quoteWords} words, so it may be a tagline or heading rather than the answer itself.` : "",
           `Where the agent found it: ${a.answer_location.replace(/_/g, " ")}${a.interactions_needed.length ? ` (${a.interactions_needed.join(" > ")})` : ""}`,
           `In TinyFish Fetch extraction: ${inFetch === null ? "not checked" : inFetch ? "yes" : "no"}. In raw server HTML: ${inRaw === null ? "not checked" : inRaw ? "yes" : "no"}. In rendered page: ${inRendered === null ? "not checked" : inRendered ? "yes" : "no"}.`,
-        ],
+        ].filter(Boolean),
         visibilityImpact: hidden
           ? "Only a browsing agent that clicks can reach this answer. Search crawlers and fetch tools quote what is in the HTML they receive."
-          : "People see this answer, but crawlers and fetch tools work from the HTML they receive, which does not contain it. They cannot quote it.",
+          : inRaw === false
+            ? "People see this answer, but crawlers that skip JavaScript work from the raw HTML, which does not contain it. They cannot quote it."
+            : "Crawlers receive this text in the HTML, but the extraction AI fetch tools apply removes it, usually because it sits in navigation, a banner or a block that looks like boilerplate. Tools that quote from extracted text cannot use it.",
         fix: {
           summary: hidden ? "Show the answer by default in the server HTML" : "Put the answer in the HTML that crawlers receive",
           steps: [
@@ -1359,12 +1382,19 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
 
 function stageNotes(b: StageBundle, out: Finding[]) {
   const missing: string[] = [];
-  if (b.browser && !b.browser.ok) missing.push(`Browser stage failed: ${b.browser.error}`);
-  if (b.agent && !b.agent.ok) missing.push(`Agent stage did not complete: ${b.agent.error || b.agent.status}`);
+  if (b.browser && !b.browser.ok) missing.push(`Browser stage failed: ${oneLineError(b.browser.error || "unknown error")}`);
+  if (b.agent && !b.agent.ok) missing.push(`Agent stage did not complete: ${oneLineError(b.agent.error || b.agent.status)}`);
   if (b.search && b.search.pagesChecked === 0) missing.push("Search stage returned no results.");
   if (!b.browser) missing.push("Browser stage skipped.");
   if (!b.agent) missing.push("Agent stage skipped.");
   if (missing.length) {
+    const text = missing.join(" ");
+    const steps: string[] = [];
+    if (/timeout|timed out|did not finish/i.test(text))
+      steps.push("A stage ran out of time: the page or the remote browser was slow. Re-run; slow pages often load on a second try. If it keeps happening, AI browsing agents are likely to give up on this page too.");
+    if (/credit|402|404|not enabled/i.test(text)) steps.push("Check your TinyFish credits and that the Browser and Agent APIs are enabled on your account.");
+    if (/skipped/.test(text)) steps.push("Tick the Browser and Agent boxes to run every check (they use TinyFish credits).");
+    if (!steps.length) steps.push("Re-run the audit; if the same stage fails again, the error above says why.");
     out.push({
       id: "audit-coverage",
       category: "access",
@@ -1373,7 +1403,7 @@ function stageNotes(b: StageBundle, out: Finding[]) {
       title: "Some checks did not run",
       evidence: missing,
       visibilityImpact: "Findings that depend on these stages are missing from this report, so scores are based on fewer signals.",
-      fix: { summary: "Re-run with all stages", steps: ["Check credits and that the Browser API is enabled on your TinyFish account."], effort: "minutes" },
+      fix: { summary: "Re-run with all stages", steps, effort: "minutes" },
       sources: [],
     });
   }

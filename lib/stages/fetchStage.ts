@@ -6,7 +6,7 @@ import { tfFetch, TinyFishError, type RawFetchResult } from "../tinyfish";
 import { markdownStats } from "../parse/markdown";
 import { looksLikeRobots, robotsVerdicts } from "../parse/robots";
 import { looksLikeChallengeText } from "../parse/html";
-import { normalizeUrl, originOf, parseInputUrl, sameSite } from "../url";
+import { normalizeUrl, originOf, pageUrlAfterRedirect, parseInputUrl, sameSite } from "../url";
 
 function unescapeMd(s: string): string {
   return s.replace(/\\([\\`*_{}[\]()#+\-.!$>|])/g, "$1");
@@ -19,7 +19,7 @@ function pick(results: RawFetchResult[], url: string): RawFetchResult | undefine
 function toPage(r: RawFetchResult): FetchedPage {
   return {
     url: r.url,
-    finalUrl: r.final_url || r.url,
+    finalUrl: pageUrlAfterRedirect(r.url, r.final_url),
     title: r.title,
     description: r.description,
     language: r.language,

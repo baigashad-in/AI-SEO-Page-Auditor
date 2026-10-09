@@ -8,7 +8,7 @@ import type { AuditInput, BotProbe, BrowserStageResult, CallLog, HtmlFacts } fro
 import { tfCreateBrowserSession, tfDeleteBrowserSession, TinyFishError } from "../tinyfish";
 import { challengeReason, CHALLENGE_MAX_WORDS, htmlFacts } from "../parse/html";
 import { normForMatch, wordCount } from "../analyze/text";
-import { parseInputUrl } from "../url";
+import { oneLineError, pageUrlAfterRedirect, parseInputUrl } from "../url";
 
 // Representative user-agent strings from each operator's public docs. Real crawlers also come from
 // verified IP ranges, so a block here is strong evidence and a pass is weak evidence.
@@ -69,7 +69,8 @@ export async function probe(
       cdp = await page.context().newCDPSession(page);
       await cdp.send("Network.setUserAgentOverride", { userAgent: bot.ua });
     }
-    const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25_000 });
+    // Only the HTML document matters here, so stop waiting once the response arrives.
+    const resp = await page.goto(url, { waitUntil: "commit", timeout: 20_000 });
     const status = resp?.status() ?? null;
     const body = resp ? await resp.text().catch(() => "") : "";
     const facts = htmlFacts(body);
@@ -81,7 +82,7 @@ export async function probe(
     else if (baselineWords >= 100 && words < baselineWords * 0.5) verdict = "degraded";
     return { bot: bot.bot, userAgent: bot.ua, status, words, challenge, verdict };
   } catch (err) {
-    return { bot: bot.bot, userAgent: bot.ua, status: null, words: 0, challenge: false, verdict: "error", error: (err as Error).message.slice(0, 200) };
+    return { bot: bot.bot, userAgent: bot.ua, status: null, words: 0, challenge: false, verdict: "error", error: oneLineError((err as Error).message) };
   } finally {
     if (routed) await page.unroute("**/*", handler).catch(() => {});
     if (cdp) await cdp.detach().catch(() => {});
@@ -156,8 +157,16 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
     const page = await context.newPage();
     await page.setViewportSize({ width: 1280, height: 800 }).catch(() => {});
 
-    const resp = await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    // Wait for the server's response, then give the page time to build its DOM. A page whose scripts
+    // keep "domcontentloaded" from firing (Substack took over 45 seconds once) is still audited from
+    // what has loaded, instead of failing the whole stage.
+    const resp = await page.goto(pageUrl, { waitUntil: "commit", timeout: 45_000 });
     const rawHtml = resp ? await resp.text().catch(() => "") : "";
+    const domReady = await page
+      .waitForLoadState("domcontentloaded", { timeout: 30_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!domReady) out.slowLoad = true;
     out.status = resp?.status() ?? null;
     const headers = resp ? await resp.allHeaders().catch(() => ({}) as Record<string, string>) : {};
     out.headers = { xRobotsTag: headers["x-robots-tag"] ?? null, contentType: headers["content-type"] ?? null };
@@ -187,7 +196,7 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
       .evaluate(() => (document.body ? document.body.innerText : ""))
       .then((t) => wordCount(t))
       .catch(() => 0);
-    out.finalUrl = page.url();
+    out.finalUrl = pageUrlAfterRedirect(pageUrl, page.url());
     // Keep this tab open: closing the last tab ends the TinyFish browser context, and the probes reuse it.
 
     out.raw = htmlFacts(rawHtml);
@@ -211,7 +220,7 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
       purpose: "Load page over CDP: capture raw server HTML, rendered DOM, headers, screenshot",
       ms: Date.now() - t1,
       ok: true,
-      detail: `status ${out.status}, raw ${out.raw.words} words, rendered ${out.rendered.words} words`,
+      detail: `status ${out.status}, raw ${out.raw.words} words, rendered ${out.rendered.words} words${out.slowLoad ? " (still loading after a 30-second wait; audited what had loaded)" : ""}`,
     });
 
     const t2 = Date.now();
@@ -237,7 +246,7 @@ export async function runBrowserStage(input: AuditInput): Promise<BrowserStageRe
     });
     out.ok = true;
   } catch (err) {
-    out.error = (err as Error).message.slice(0, 300);
+    out.error = oneLineError((err as Error).message, 300);
     calls.push({ endpoint: "browser", purpose: "Load page over CDP", ms: Date.now() - t1, ok: false, detail: out.error });
   } finally {
     if (browser) await browser.close().catch(() => {});

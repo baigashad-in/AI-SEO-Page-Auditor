@@ -47,12 +47,13 @@ export function withBrowserRobots(b: StageBundle): StageBundle {
   }
   if (v.validLines === 0) return b;
 
+  const fetchNote = f.robots.reflowed ? " Fetch's copy had lost its line breaks." : "";
   const note =
-    f.robots.status !== "parsed"
+    (f.robots.status !== "parsed"
       ? "Read as plain text through TinyFish Browser, because the copy Fetch returned could not be parsed. Parsed with RFC 9309 matching."
       : sameVerdicts(f.robots.verdicts, v.verdicts)
         ? "Parsed with RFC 9309 matching (plain text read through TinyFish Browser; Fetch's copy gives the same result)."
-        : "Read as plain text through TinyFish Browser and parsed with RFC 9309 matching. The copy Fetch returned gave different results, so the plain-text copy is used.";
+        : "Read as plain text through TinyFish Browser and parsed with RFC 9309 matching. The copy Fetch returned gave different results, so the plain-text copy is used.") + fetchNote;
 
   // A sitemap declared in the plain-text copy that Fetch never saw: say it exists instead of "no sitemap".
   const sitemap =
