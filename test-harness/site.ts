@@ -82,7 +82,16 @@ const blogShell = `<!doctype html><html><head><title>Example Blog</title>
 "We shipped a new way to follow writers, better stats pages for authors, and a faster editor that keeps drafts in sync across devices. ".repeat(3)+"</p></article>";}).join("");</script>
 </body></html>`;
 
+// A page whose blocking script arrives after 50 seconds, so "domcontentloaded" fires late (Substack's
+// profile page did this once). The server HTML is complete; only the browser's DOM event is slow.
+const slowPage = `<!doctype html><html><head><title>Slow profile</title><script src="/slow.js"></script></head>
+<body><main><h1>Slow profile</h1><p>${"This profile page has a short bio and a list of recent posts about pricing. ".repeat(6)}</p></main></body></html>`;
+
 const pages: Record<string, Record<string, { type: string; body: string }>> = {
+  "slow.audit-demo.example": {
+    "/@profile": { type: "text/html", body: slowPage },
+    "/robots.txt": { type: "text/plain", body: "User-agent: *\nAllow: /\n" },
+  },
   "verify.audit-demo.example": {
     "/r/seo/": { type: "text/html", body: challengePage },
     "/robots.txt": { type: "text/plain", body: "# Example robots.txt\nUser-agent: *\nDisallow: /\n" },
@@ -112,6 +121,13 @@ export function startSite(port = 4100) {
     if (host === TARGET && /ClaudeBot/i.test(ua)) {
       res.writeHead(403, { "content-type": "text/html" });
       res.end("<html><head><title>Just a moment...</title></head><body><div class=cf-chl>Checking your browser</div></body></html>");
+      return;
+    }
+    if (host === "slow.audit-demo.example" && path === "/slow.js") {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "application/javascript" });
+        res.end("window.loaded = true;");
+      }, 50_000);
       return;
     }
     const page = pages[host]?.[path];
