@@ -1,13 +1,10 @@
 // Usage:
 //   npm run audit -- https://example.com/page --query "target query" [--location US] [--no-browser] [--no-agent] [--out reports]
-// Writes <out>/<slug>.md and <out>/<slug>.json and prints the summary.
+// Writes <out>/ai-audit-<page>-<run time>.md and .json and prints the summary.
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { loadEnv } from "./env";
 import { runFullAudit } from "../lib/orchestrate";
-import { reportToMarkdown } from "../lib/analyze/markdownReport";
-import { slugForUrl as slugFor } from "../lib/url";
+import { saveReport } from "./save";
 
 loadEnv();
 
@@ -33,11 +30,7 @@ async function main() {
     { url, query: arg("query"), location: arg("location") || "US" },
     { skipBrowser: process.argv.includes("--no-browser"), skipAgent: process.argv.includes("--no-agent"), onProgress: (m) => console.log(`  ${m}`) },
   );
-  mkdirSync(out, { recursive: true });
-  const base = join(out, slugFor(url));
-  writeFileSync(`${base}.md`, reportToMarkdown(report));
-  const { screenshot: _s, ...browserNoShot } = report.stages.browser ?? ({} as Record<string, unknown>);
-  writeFileSync(`${base}.json`, JSON.stringify({ ...report, stages: { ...report.stages, browser: report.stages.browser ? browserNoShot : null } }, null, 2));
+  const saved = saveReport(out, report);
 
   console.log(`\nReadability ${report.scores.readability}/100, visibility ${report.scores.visibility ?? "n/a"}/100, answer test: ${report.scores.answerability}`);
   for (const line of report.connection) console.log(`* ${line}`);
@@ -46,7 +39,7 @@ async function main() {
     const f = report.findings.find((x) => x.id === id)!;
     console.log(`${i + 1}. [${f.severity}] ${f.title}`);
   });
-  console.log(`\nSaved ${base}.md and ${base}.json`);
+  console.log(`\nSaved ${saved.md} and ${saved.json}`);
 }
 
 main().catch((err) => {

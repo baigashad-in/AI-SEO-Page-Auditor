@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { AuditReport, Finding, Category } from "@/lib/types";
 import { reportToMarkdown } from "@/lib/analyze/markdownReport";
-import { rootDomain, sameSite, slugForUrl } from "@/lib/url";
+import { reportFileBase, rootDomain, sameSite } from "@/lib/url";
 
 const CATEGORY_TITLE: Record<Category, string> = {
   access: "Can AI crawlers get in?",
@@ -33,8 +33,6 @@ function download(name: string, text: string, type: string) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
-
-const slug = slugForUrl;
 
 function CodeBlock({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
@@ -419,13 +417,13 @@ export default function Report({ report: r }: { report: AuditReport }) {
       <section>
         <h2>Take it with you</h2>
         <div className="actions">
-          <button type="button" className="btn" onClick={() => download(`ai-audit-${slug(r.input.url)}.md`, reportToMarkdown(r), "text/markdown")}>
+          <button type="button" className="btn" onClick={() => download(`${reportFileBase(r.input.url, r.generatedAt)}.md`, reportToMarkdown(r), "text/markdown")}>
             Download Markdown report
           </button>
           <button
             type="button"
             className="btn-quiet"
-            onClick={() => download(`ai-audit-${slug(r.input.url)}.json`, JSON.stringify(r, null, 2), "application/json")}
+            onClick={() => download(`${reportFileBase(r.input.url, r.generatedAt)}.json`, JSON.stringify(r, null, 2), "application/json")}
           >
             Download raw JSON
           </button>

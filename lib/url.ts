@@ -64,6 +64,19 @@ export function sameSite(a: string, b: string): boolean {
 }
 
 /** File-name-safe slug for a URL, e.g. "example-com-blog-post". */
+/** "2026-10-09-103012" (UTC) from an ISO time, so saved files sort by run time and old runs are easy to spot. */
+export function stampForFile(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "undated";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
+}
+
+/** File name (no extension) for a saved report, the same in the UI, the CLI and the batch demo. */
+export function reportFileBase(url: string, generatedAt: string): string {
+  return `ai-audit-${slugForUrl(url)}-${stampForFile(generatedAt)}`;
+}
+
 export function slugForUrl(url: string): string {
   try {
     const u = new URL(/^https?:/i.test(url) ? url : `https://${url}`);

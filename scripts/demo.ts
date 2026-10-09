@@ -1,20 +1,21 @@
-// Runs the audit on every page in demo-pages.json (or a file passed as the first argument)
-// and writes one report per page plus demo-reports/index.md comparing them.
+// Runs the audit on every page in demo-pages.json (or a file passed as the first argument).
+// Each run gets its own folder, demo-reports/<run time>/, holding a .md and a .json per page plus
+// index.md comparing them. Upload the files from one folder to share a complete run.
 // Usage: npm run demo [-- pages.json] [--no-agent] [--no-browser]
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { loadEnv } from "./env";
 import { runFullAudit } from "../lib/orchestrate";
-import { reportToMarkdown } from "../lib/analyze/markdownReport";
-import { slugForUrl as slugFor } from "../lib/url";
+import { stampForFile } from "../lib/url";
+import { saveReport } from "./save";
 
 loadEnv();
 
 async function main() {
   const file = process.argv.slice(2).find((a) => a.endsWith(".json")) || "demo-pages.json";
   const pages: { url: string; query?: string; why?: string }[] = JSON.parse(readFileSync(file, "utf8"));
-  const out = "demo-reports";
+  const out = join("demo-reports", stampForFile(new Date().toISOString()));
   mkdirSync(out, { recursive: true });
   const rows: string[] = [];
   for (const [i, p] of pages.entries()) {
@@ -27,11 +28,11 @@ async function main() {
         { url: p.url, query: p.query, location: "US" },
         { skipAgent: process.argv.includes("--no-agent"), skipBrowser: process.argv.includes("--no-browser"), onProgress: (m) => console.log(`  ${m}`) },
       );
-      const slug = slugFor(p.url);
-      writeFileSync(join(out, `${slug}.md`), reportToMarkdown(r));
+      const saved = saveReport(out, r);
+      console.log(`  Saved ${basename(saved.md)} and ${basename(saved.json)}`);
       const top = r.findings.find((f) => f.severity !== "info");
       rows.push(
-        `| [${p.url}](${slug}.md) | ${r.query} | ${r.scores.readability} | ${r.scores.visibility ?? "n/a"} | ${r.scores.answerability.replace(/_/g, " ")} | ${r.views.rawWords ?? "n/a"} / ${r.views.renderedWords ?? "n/a"} / ${r.views.extractedWords ?? "n/a"} | ${top ? `${top.severity}: ${top.title.replace(/\|/g, "/")}` : "none"} | ${Math.round((Date.now() - started) / 1000)}s |`,
+        `| [${p.url}](${basename(saved.md)}) | ${r.query} | ${r.scores.readability} | ${r.scores.visibility ?? "n/a"} | ${r.scores.answerability.replace(/_/g, " ")} | ${r.views.rawWords ?? "n/a"} / ${r.views.renderedWords ?? "n/a"} / ${r.views.extractedWords ?? "n/a"} | ${top ? `${top.severity}: ${top.title.replace(/\|/g, "/")}` : "none"} | ${Math.round((Date.now() - started) / 1000)}s |`,
       );
     } catch (err) {
       rows.push(`| ${p.url} | ${p.query ?? ""} | error | | | | ${(err as Error).message.replace(/\|/g, "/")} | |`);
@@ -48,7 +49,7 @@ async function main() {
     "",
   ].join("\n");
   writeFileSync(join(out, "index.md"), index);
-  console.log(`\nWrote ${out}/index.md`);
+  console.log(`\nWrote ${join(out, "index.md")}. Every .md and .json from this run is in ${out}.`);
 }
 
 main().catch((err) => {
