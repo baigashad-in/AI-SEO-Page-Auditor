@@ -88,3 +88,24 @@ describe("content gaps", () => {
     expect(gaps.map(([term]) => term)).not.toContain("content");
   });
 });
+
+describe("content gaps from single words", () => {
+  it("keeps phrases used by 2 of 3 pages but drops single words unless every page has them in a heading (tinyfish.ai)", () => {
+    const steel = { url: "https://steel.dev/", title: "Steel", terms: { stuck: 2, human: 4, "open source": 3, "browser session": 6 }, headings: ["Help your agent whenever it's stuck", "Browse like humans", "Open source browser sessions"] };
+    const paper = { url: "https://a.github.io/agents/", title: "Paper", terms: { "api call": 13 }, headings: ["API calls for agents"] };
+    const bb = { url: "https://browserbase.com/", title: "Browserbase", terms: { stuck: 2, human: 5, "open source": 10, "browser session": 4 }, headings: ["Unblock agents that get stuck", "Research at a scale no human could", "Open source browser sessions"] };
+    const terms = topicGaps("Search, fetch and browse the web with one API.", [steel, paper, bb]).map(([term]) => term);
+    expect(terms).toEqual(expect.arrayContaining(["open source", "browser session"]));
+    expect(terms).not.toContain("stuck");
+    expect(terms).not.toContain("human");
+  });
+});
+
+describe("blocker labels", () => {
+  it("adds no override note when the agent's label was just 'other' (Reddit)", () => {
+    const a = agent({ answer_found: false, answer_location: "not_on_page", blockers: [{ type: "other", description: "Page shows 'You've been blocked by network security' instead of the subreddit." }] });
+    const finding = buildFindings(bundle({ agent: a })).find((x) => x.id === "answer-blocked")!;
+    expect(finding.title).toContain("(a block page)");
+    expect(finding.evidence.join(" ")).not.toContain("the agent called this");
+  });
+});

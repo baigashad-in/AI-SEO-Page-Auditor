@@ -1116,10 +1116,12 @@ export function topicGaps(
     phrases.push([term, { ...v }]);
   }
   const covered = new Set(phrases.flatMap(([p]) => p.split(" ")));
+  // Single words are noisier than phrases ("stuck" and "human" in tinyfish.ai competitors' headings),
+  // so one only counts when every compared page uses it in a heading.
   const singles = [...df.entries()]
     .filter(
       ([term, v]) =>
-        !term.includes(" ") && v.n >= need && term.length >= 5 && clean(term) && !target.has(term) && !covered.has(term) && (headingTerms.get(term) || 0) >= need,
+        !term.includes(" ") && v.n >= need && term.length >= 5 && clean(term) && !target.has(term) && !covered.has(term) && (headingTerms.get(term) || 0) >= comps.length,
     )
     .sort(byStrength);
   return [...phrases, ...singles].slice(0, limit);
@@ -1222,9 +1224,10 @@ export function blockerPhrase(x: { type: string; description: string }): string 
 /** One evidence line per blocker, saying so when the agent's label was overridden. */
 function blockerEvidence(x: { type: string; description: string }): string {
   const label = x.type.replace(/_/g, " ");
-  return blockerType(x) === x.type
-    ? `${label}: ${x.description}`
-    : `${label}: ${x.description} (the agent called this a ${label}, but it describes a bot block, so the fix is for the block)`;
+  // "other" is no label at all, so there is nothing to override.
+  if (blockerType(x) === x.type || x.type === "other") return `${label}: ${x.description}`;
+  const article = /^[aeiou]/i.test(label) ? "an" : "a";
+  return `${label}: ${x.description} (the agent called this ${article} ${label}, but it describes a bot block, so the fix is for the block)`;
 }
 
 function blockerFix(x: { type: string; description: string }): string {
