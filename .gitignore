@@ -6,5 +6,5 @@ out
 *.tsbuildinfo
 next-env.d.ts
 reports/
-.DS_Store
 demo-reports/
+.DS_Store

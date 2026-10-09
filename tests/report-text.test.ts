@@ -1,13 +1,14 @@
 // Text the report writes for the site owner: URLs, errors, drafts, wording taken from the page,
 // and how the agent's quote is matched. Cases follow live runs on all six demo pages.
 import { describe, expect, it } from "vitest";
-import { buildFindings, pageCasing } from "../lib/analyze/findings";
+import { buildFindings, pageCasing, snippetDraft } from "../lib/analyze/findings";
 import { buildReport, domainList } from "../lib/analyze/report";
 import { reportToMarkdown } from "../lib/analyze/markdownReport";
 import { quoteAppearsIn } from "../lib/analyze/text";
+import { robotsVerdicts } from "../lib/parse/robots";
 import { displayUrl, oneLineError, pageUrlAfterRedirect } from "../lib/url";
 import type { FetchStageResult } from "../lib/types";
-import { agent, browserStage, bundle, fetchStage, REDDIT_URL } from "./helpers";
+import { agent, browserStage, bundle, fetchStage, REDDIT_URL, search } from "./helpers";
 
 // Fetch result shaped like Reddit's r/SEO page: a title and no meta description.
 const redditFetch = (md: string, over: Partial<FetchStageResult> = {}) => fetchStage(md, over, REDDIT_URL, { title: "The SEO Authority", description: null });
@@ -23,7 +24,7 @@ describe("URLs and errors in the report", () => {
   it("shortens long share and tracking query strings for display (Substack)", () => {
     const long =
       "https://goodbetterbest.substack.com/p/3-simple-steps-to-make-pricing-changes?publication_id=22060&post_id=149705595&isFreemail=true&r=e0pzy&triedRedirect=true&utm_source=www.plg.news";
-    expect(displayUrl(long)).toBe("https://goodbetterbest.substack.com/p/3-simple-steps-to-make-pricing-changes?…");
+    expect(displayUrl(long)).toBe("https://goodbetterbest.substack.com/p/3-simple-steps-to-make-pricing-changes?\u2026");
     expect(displayUrl("https://shop.example/item?id=42")).toBe("https://shop.example/item?id=42");
   });
 
@@ -102,5 +103,49 @@ describe("the agent's quote", () => {
     expect(finding.confidence).toBe("low");
     expect(finding.visibilityImpact).toContain("Crawlers receive this text in the HTML");
     expect(finding.evidence.join(" ")).toContain("only 5 words");
+  });
+});
+
+describe("description drafts when the agent could not answer", () => {
+  it("uses the search snippet instead of the first post on a feed page (Reddit)", () => {
+    const a = agent({ answer_found: false, answer_location: "not_on_page", blockers: [{ type: "login_wall", description: "You've been blocked by network security." }] });
+    const md = "Reddit's No.1 SEO Community!\n\nso after seeing all the 'are AI bots ignoring robots.txt' threads i wanted to actually test it instead of guessing from logs.";
+    const snippet = "r/SEO: The leading authority on all things SEO: AI SEO, GEO, LLM SEO, Technical SEO, Content SEO and SEO Architecture. Bring your ideas, problems\u2026";
+    const s = search(1, { target: { position: 1, matchedUrl: REDDIT_URL, serpTitle: "The SEO Authority - Reddit", serpSnippet: snippet } }, REDDIT_URL, "seo subreddit");
+    const finding = buildFindings(bundle({ fetch: redditFetch(md), agent: a, search: s }, REDDIT_URL, "seo subreddit")).find((x) => x.id === "meta-description-missing")!;
+    expect(finding.fix.code).toContain('content="r/SEO: The leading authority on all things SEO: AI SEO, GEO, LLM SEO, Technical SEO, Content SEO and SEO Architecture."');
+    expect(finding.fix.code).not.toContain("Bring your ideas");
+    expect(finding.fix.code).not.toContain("so after seeing");
+  });
+
+  it("drops a leading date and an unfinished last sentence from snippets", () => {
+    expect(snippetDraft("Jan 5, 2024 \u2014 Our guide explains how pricing pages work and what to test first on them. More tips for\u2026")).toBe(
+      "Our guide explains how pricing pages work and what to test first on them.",
+    );
+    expect(snippetDraft("Too short\u2026")).toBeNull();
+  });
+});
+
+describe("an answer behind a click that crawlers already receive (tinyfish.ai)", () => {
+  it("is info, with an optional fix and no server-HTML advice", () => {
+    const quote = "Navigate, fill forms, authenticate, return structured results. Give it a goal in plain English.";
+    const html = `<html><body><main><h2>TinyAgent</h2><p>${quote}</p></main></body></html>`;
+    const a = agent({ answer_location: "after_interaction", interactions_needed: ["Dismissed banner", "Clicked TinyAgent product card"], evidence_quote: quote });
+    const finding = buildFindings(bundle({ fetch: fetchStage(quote), browser: browserStage(html), agent: a })).find((x) => x.id === "answer-hidden")!;
+    expect(finding.severity).toBe("info");
+    expect(finding.visibilityImpact).toContain("No effect on AI visibility");
+    expect(finding.fix.summary).toBe("Optional: show it to people without a click");
+    expect(finding.fix.code).toBeUndefined();
+  });
+});
+
+describe("the robots.txt line in the summary", () => {
+  it("is hedged when the page ranks even though robots.txt closes it (Reddit)", () => {
+    const v = robotsVerdicts("User-agent: *\nDisallow: /\n", REDDIT_URL);
+    const f = redditFetch("text", { robots: { found: true, url: "https://www.reddit.com/robots.txt", note: "", verdicts: v.verdicts, sitemaps: [], status: "parsed" } });
+    const r = buildReport(bundle({ fetch: f, search: search(1, {}, REDDIT_URL, "seo subreddit") }, REDDIT_URL, "seo subreddit"), { url: REDDIT_URL });
+    const line = r.connection.find((l) => l.includes("search crawlers"))!;
+    expect(line).toContain("as served to TinyFish");
+    expect(line).toContain("The page still ranks");
   });
 });

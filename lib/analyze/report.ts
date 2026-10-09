@@ -176,7 +176,14 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
   }
 
   const blockedSearch = f?.robots.verdicts.filter((v) => !v.allowed && v.bot.purpose === "ai_search") ?? [];
-  if (blockedSearch.length) lines.push(`robots.txt excludes ${blockedSearch.map((v) => v.bot.operator).join(", ")} search crawlers, so this page cannot appear in those answer engines regardless of its Google ranking.`);
+  const classicBlocked = f?.robots.verdicts.some((v) => !v.allowed && v.bot.purpose === "classic_search") ?? false;
+  const indexedAnyway = classicBlocked && (pos !== null || !!s?.indexProbe.found);
+  if (blockedSearch.length)
+    lines.push(
+      indexedAnyway
+        ? `robots.txt, as served to TinyFish, excludes ${blockedSearch.map((v) => v.bot.operator).join(", ")} search crawlers. The page still ranks, so the site may treat verified crawlers differently; if those engines get the same file, the page cannot appear in their answers.`
+        : `robots.txt excludes ${blockedSearch.map((v) => v.bot.operator).join(", ")} search crawlers, so this page cannot appear in those answer engines regardless of its Google ranking.`,
+    );
   const edge = br?.botProbes.filter((p) => p.verdict === "blocked" && AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
   if (edge.length)
     lines.push(

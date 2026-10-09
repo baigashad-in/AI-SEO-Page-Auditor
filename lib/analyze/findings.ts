@@ -114,8 +114,22 @@ function agentSummary(b: StageBundle): string | null {
   return a?.answer_found ? a.answer_summary : null;
 }
 
-export function suggestDescription(markdown: string, h1: string | null, agentAnswer?: string | null): string {
+/** A search snippet as a description draft: no leading date, no unfinished last sentence ("problems…"). */
+export function snippetDraft(snippet: string | null | undefined): string | null {
+  if (!snippet) return null;
+  const s = snippet
+    .replace(/^[A-Z][a-z]{2,8}\.? \d{1,2}, \d{4}\s*[\u2014\u2013-]\s*/, "")
+    .replace(/[\s\u00b7]+$/, "")
+    .replace(/\s*[^.!?]*(?:\u2026|\.\.\.)\s*$/, "")
+    .trim();
+  return s.split(/\s+/).length >= 8 ? s : null;
+}
+
+export function suggestDescription(markdown: string, h1: string | null, agentAnswer?: string | null, searchSnippet?: string | null): string {
   if (agentAnswer && agentAnswer.split(/\s+/).length >= 8) return fitToLength(agentAnswer).replace(/"/g, "'");
+  // The engine's own snippet describes the page better than the first paragraph of a feed or listing.
+  const snip = snippetDraft(searchSnippet);
+  if (snip) return fitToLength(snip).replace(/"/g, "'");
   const blocks = markdown.split(/\n\s*\n/).map((b) => b.trim());
   for (const b of blocks) {
     if (/^(#|\||[-*+]\s|\d+[.)]\s|>)/.test(b)) continue;
@@ -164,7 +178,7 @@ function jsonLdSuggestion(b: StageBundle): string {
   const p = b.fetch?.page;
   const url = b.browser?.finalUrl || p?.finalUrl || b.url;
   const title = r?.title || p?.title || "Page title";
-  const desc = r?.metaDescription || p?.description || (p ? suggestDescription(p.markdown, r?.h1[0] ?? null, agentSummary(b)) : "Short description");
+  const desc = r?.metaDescription || p?.description || (p ? suggestDescription(p.markdown, r?.h1[0] ?? null, agentSummary(b), b.search?.target.serpSnippet) : "Short description");
   const image = r?.og.image || p?.imageLinks[0] || undefined;
   const site = rootDomain(url);
   let obj: Record<string, unknown>;
@@ -685,7 +699,7 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
     });
   }
   if (!f.page.description) {
-    const draft = suggestDescription(md, ren?.h1[0] ?? null, agentSummary(b));
+    const draft = suggestDescription(md, ren?.h1[0] ?? null, agentSummary(b), b.search?.target.serpSnippet);
     out.push({
       id: "meta-description-missing",
       category: "metadata",
@@ -1039,7 +1053,7 @@ const GAP_IGNORE = new Set(
     "people important different example examples information learn understand include includes including based provide " +
     "provides able often every without within while however also really simple simply right overview introduction basics " +
     "next previous related read article page pages site website click step steps way ways time times part " +
-    "choose choosing select selecting started getting build building tool tools"
+    "choose choosing select selecting started getting build building tool tools content engage"
   )
     .split(/\s+/)
     .map(stem),
@@ -1186,11 +1200,35 @@ const BLOCKER_PHRASE: Record<string, string> = {
   region_block: "a region block",
   broken_page: "a broken page",
   other: "an obstacle",
+  block_page: "a block page",
 };
 
+// Text that describes a bot block, whatever label the agent picked. Reddit's "You've been blocked by
+// network security" page came back labelled as a login wall, which led to login-wall advice.
+const BLOCK_PAGE_TEXT =
+  /blocked by network security|you['\u2019]ve been blocked|you have been blocked|access denied|security verification|verif(?:y|ying) (?:that )?you are (?:a )?human|prove your humanity|bot (?:check|protection|challenge)|challenge page/i;
+
+/** The blocker type to report and fix: the agent's label, unless its description reads as a bot block. */
+export function blockerType(x: { type: string; description: string }): string {
+  return x.type !== "captcha" && BLOCK_PAGE_TEXT.test(x.description) ? "block_page" : x.type;
+}
+
 export function blockerPhrase(x: { type: string; description: string }): string {
-  if (x.type === "other" && /block|denied|forbidden|security|challenge/i.test(x.description)) return "a block page";
-  return BLOCKER_PHRASE[x.type] || "an obstacle";
+  const t = blockerType(x);
+  if (t === "block_page" || (t === "other" && /block|denied|forbidden|security|challenge/i.test(x.description))) return "a block page";
+  return BLOCKER_PHRASE[t] || "an obstacle";
+}
+
+/** One evidence line per blocker, saying so when the agent's label was overridden. */
+function blockerEvidence(x: { type: string; description: string }): string {
+  const label = x.type.replace(/_/g, " ");
+  return blockerType(x) === x.type
+    ? `${label}: ${x.description}`
+    : `${label}: ${x.description} (the agent called this a ${label}, but it describes a bot block, so the fix is for the block)`;
+}
+
+function blockerFix(x: { type: string; description: string }): string {
+  return BLOCKER_FIX[blockerType(x)] || BLOCKER_FIX.other;
 }
 
 // Blocker descriptions that mean the agent never reached the content at all.
@@ -1198,7 +1236,7 @@ const ACCESS_BLOCK = /block|denied|forbidden|captcha|challenge|security|verify|h
 
 export function agentWasBlocked(a: AgentAnswer): boolean {
   return a.blockers.some(
-    (x) => ["captcha", "login_wall", "paywall", "region_block", "broken_page"].includes(x.type) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
+    (x) => ["captcha", "login_wall", "paywall", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
   );
 }
 
@@ -1229,6 +1267,8 @@ const BLOCKER_FIX: Record<string, string> = {
   cookie_wall: "Use a cookie banner that sits at the bottom of the screen and does not block reading or replace content in the HTML.",
   modal: "Delay newsletter or promo pop-ups, or remove them on content pages.",
   age_gate: "Show the age gate only where legally required, and keep a short public summary visible behind it.",
+  block_page:
+    "Check why automated browsers are blocked (bot manager, WAF rule, rate limit). Allow verified AI agents and search crawlers on public content pages.",
 };
 
 function answerabilityChecks(b: StageBundle, out: Finding[]) {
@@ -1246,10 +1286,10 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
       severity: "high",
       confidence: "medium",
       title: `An AI browsing agent was blocked before it could read the page (${[...new Set(blockers.map(blockerPhrase))].join(", ")})`,
-      evidence: blockers.map((x) => `${x.type.replace(/_/g, " ")}: ${x.description}`),
+      evidence: blockers.map(blockerEvidence),
       visibilityImpact:
         "Browsing agents (ChatGPT agent, Claude in Chrome and similar) read pages on a user's behalf. If they are blocked, they answer from other sources and cite those instead.",
-      fix: { summary: "Let AI agents reach public content", steps: [...new Set(blockers.map((x) => BLOCKER_FIX[x.type] || BLOCKER_FIX.other))], effort: "hours" },
+      fix: { summary: "Let AI agents reach public content", steps: [...new Set(blockers.map(blockerFix))], effort: "hours" },
       sources: ["agent"],
     });
   } else if (!a.answer_found) {
@@ -1310,14 +1350,16 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
         title = "The answer is in the HTML, but AI extraction drops it";
 
       } else {
-        severity = "low";
+        // In the raw HTML and in Fetch's text: AI tools already receive it. Only people need the click.
+        severity = "info";
         title = "The answer is readable by crawlers but hidden from people behind a click";
       }
+      const crawlersHaveIt = inFetch !== false && inRaw !== false;
       // A few words (a tagline, a heading) are weak evidence of where "the answer" lives, and
       // extractors often drop taglines on purpose.
       const quoteWords = a.evidence_quote.split(/\s+/).filter(Boolean).length;
       const shortQuote = quoteWords < 8;
-      if (shortQuote && severity !== "low") severity = severity === "high" ? "medium" : "low";
+      if (shortQuote && (severity === "high" || severity === "medium")) severity = severity === "high" ? "medium" : "low";
       out.push({
         id: "answer-hidden",
         category: "answerability",
@@ -1330,12 +1372,20 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
           `Where the agent found it: ${a.answer_location.replace(/_/g, " ")}${a.interactions_needed.length ? ` (${a.interactions_needed.join(" > ")})` : ""}`,
           `In TinyFish Fetch extraction: ${inFetch === null ? "not checked" : inFetch ? "yes" : "no"}. In raw server HTML: ${inRaw === null ? "not checked" : inRaw ? "yes" : "no"}. In rendered page: ${inRendered === null ? "not checked" : inRendered ? "yes" : "no"}.`,
         ].filter(Boolean),
-        visibilityImpact: hidden
+        visibilityImpact: hidden && crawlersHaveIt
+          ? "No effect on AI visibility: crawlers and fetch tools already receive this text in the HTML. Only people have to click to see it."
+          : hidden
           ? "Only a browsing agent that clicks can reach this answer. Search crawlers and fetch tools quote what is in the HTML they receive."
           : inRaw === false
             ? "People see this answer, but crawlers that skip JavaScript work from the raw HTML, which does not contain it. They cannot quote it."
             : "Crawlers receive this text in the HTML, but the extraction AI fetch tools apply removes it, usually because it sits in navigation, a banner or a block that looks like boilerplate. Tools that quote from extracted text cannot use it.",
-        fix: {
+        fix: crawlersHaveIt && hidden
+          ? {
+              summary: "Optional: show it to people without a click",
+              steps: ["Crawlers and fetch tools already receive this text, so nothing is needed for AI visibility.", "If visitors should see it right away, show that card or tab expanded by default."],
+              effort: "minutes",
+            }
+          : {
           summary: hidden ? "Show the answer by default in the server HTML" : "Put the answer in the HTML that crawlers receive",
           steps: [
             hidden ? "Render tab or accordion content in the HTML (collapsed with CSS or <details>), not loaded on click." : "",
@@ -1352,12 +1402,14 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
 
   // Overlays and walls the agent got past (when it was not fully blocked; that case is reported above).
   if (!(blocked && !a.answer_found)) {
-    const serious = a.blockers.filter((x) => ["login_wall", "paywall", "captcha", "region_block", "broken_page"].includes(x.type) || (x.type === "other" && ACCESS_BLOCK.test(x.description)));
+    const serious = a.blockers.filter(
+      (x) => ["login_wall", "paywall", "captcha", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
+    );
     const covering = a.blockers.filter((x) => !serious.includes(x));
     if (serious.length || covering.length) {
       const all = [...serious, ...covering];
-      // A banner the agent dismissed before answering from content visible on load is minor.
-      const answeredAnyway = a.answer_found && (a.answer_location === "visible_on_load" || a.answer_location === "after_scroll");
+      // A banner or pop-up the agent dismissed and then answered anyway is friction, not a blocker.
+      const answeredAnyway = a.answer_found;
       out.push({
         id: "answer-blockers",
         category: "answerability",
@@ -1365,13 +1417,13 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
         confidence: "medium",
         title: `The agent had to get past ${[...new Set(all.map(blockerPhrase))].join(", ")}`,
         evidence: [
-          ...all.map((x) => `${x.type.replace(/_/g, " ")}: ${x.description}`),
-          !serious.length && answeredAnyway ? "The agent got past it and still answered from content visible on load." : "",
+          ...all.map(blockerEvidence),
+          !serious.length && answeredAnyway ? "The agent got past it and still answered." : "",
         ].filter(Boolean),
         visibilityImpact: "Browsing agents (ChatGPT agent, Claude in Chrome and similar) have to get past these to read the page. Each one is a chance to give up and use another source.",
         fix: {
           summary: serious.length ? "Let readers reach the content without a challenge or wall" : "Do not cover content with overlays",
-          steps: [...new Set(all.map((x) => BLOCKER_FIX[x.type] || BLOCKER_FIX.other))],
+          steps: [...new Set(all.map(blockerFix))],
           effort: "hours",
         },
         sources: ["agent"],

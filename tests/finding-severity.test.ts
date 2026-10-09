@@ -2,7 +2,7 @@
 // Cases follow live runs on Medium, Substack and tinyfish.ai.
 import { describe, expect, it } from "vitest";
 import { markdownStats } from "../lib/parse/markdown";
-import { buildFindings } from "../lib/analyze/findings";
+import { buildFindings, topicGaps } from "../lib/analyze/findings";
 import { agent, browserStage, bundle, fetchStage, PAGE_URL, search } from "./helpers";
 
 describe("query words missing from the text", () => {
@@ -54,5 +54,37 @@ describe("obstacles the agent got past", () => {
     expect(buildFindings(bundle({ agent: a })).find((x) => x.id === "answer-blockers")!.severity).toBe("low");
     const notFound = agent({ answer_found: false, blockers: [{ type: "modal", description: "Newsletter pop-up" }] });
     expect(buildFindings(bundle({ agent: notFound })).find((x) => x.id === "answer-blockers")!.severity).toBe("medium");
+  });
+});
+
+describe("blockers the agent labels wrongly", () => {
+  it("treats a 'login wall' that says 'blocked by network security' as a block page (Reddit)", () => {
+    const a = agent({
+      answer_found: false,
+      answer_location: "not_on_page",
+      blockers: [{ type: "login_wall", description: "Reddit requires login to view the subreddit content, showing a 'You've been blocked by network security' message with a login button." }],
+    });
+    const finding = buildFindings(bundle({ agent: a })).find((x) => x.id === "answer-blocked")!;
+    expect(finding.title).toContain("(a block page)");
+    expect(finding.fix.steps.join(" ")).not.toContain("login wall");
+    expect(finding.evidence.join(" ")).toContain("the agent called this a login wall, but it describes a bot block");
+  });
+
+  it("keeps a real login wall as a login wall", () => {
+    const a = agent({ answer_found: false, answer_location: "not_on_page", blockers: [{ type: "login_wall", description: "The page asks members to sign in before showing the article." }] });
+    expect(buildFindings(bundle({ agent: a })).find((x) => x.id === "answer-blocked")!.title).toContain("(a login wall)");
+  });
+
+  it("rates a banner the agent dismissed as low even when it answered after clicking (tinyfish.ai)", () => {
+    const a = agent({ answer_location: "after_interaction", blockers: [{ type: "cookie_wall", description: "Cookie/notification banner at the top about Search and Fetch APIs" }] });
+    expect(buildFindings(bundle({ agent: a })).find((x) => x.id === "answer-blockers")!.severity).toBe("low");
+  });
+});
+
+describe("content gaps", () => {
+  it("ignores generic words like 'content' even when competitors use them in headings (Substack)", () => {
+    const comp = (url: string) => ({ url, title: "t", terms: { content: 4, pricing: 9, "pricing change": 3 }, headings: ["Engage with our content", "Pricing changes this week"] });
+    const gaps = topicGaps("John Kotowski, CEO of PricingSaaS.", [comp("https://a.com/"), comp("https://b.com/"), comp("https://c.com/")]);
+    expect(gaps.map(([term]) => term)).not.toContain("content");
   });
 });
