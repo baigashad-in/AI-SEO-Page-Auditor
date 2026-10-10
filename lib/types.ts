@@ -214,7 +214,7 @@ export interface SearchStageResult {
 
 /* Agent stage */
 
-export type AnswerLocation = "visible_on_load" | "after_scroll" | "after_interaction" | "not_on_page";
+export type AnswerLocation = "visible_on_load" | "after_scroll" | "after_interaction" | "other_page" | "not_on_page";
 
 export interface AgentAnswer {
   answer_found: boolean;
@@ -262,7 +262,7 @@ export interface Finding {
 export interface Scores {
   readability: number; // 0-100, can AI tools read the page
   visibility: number | null; // 0-100, does it show up in search; null when Search did not run
-  answerability: "answered" | "answered_with_effort" | "not_answered" | "unknown";
+  answerability: "answered" | "answered_with_effort" | "answered_elsewhere" | "not_answered" | "unknown";
   quadrant: "readable_visible" | "readable_invisible" | "unreadable_visible" | "unreadable_invisible" | "unknown";
   readabilityParts: { label: string; score: number; max: number }[];
   visibilityParts: { label: string; score: number; max: number }[];

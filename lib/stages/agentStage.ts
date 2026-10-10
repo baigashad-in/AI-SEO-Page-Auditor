@@ -8,7 +8,7 @@ import type { AgentAnswer, AgentStageResult, AnswerLocation, CallLog } from "../
 import { tfCancelAgentRun, tfGetAgentRun, tfStartAgentRun, TinyFishError } from "../tinyfish";
 import { parseInputUrl } from "../url";
 
-const LOCATIONS: AnswerLocation[] = ["visible_on_load", "after_scroll", "after_interaction", "not_on_page"];
+const LOCATIONS: AnswerLocation[] = ["visible_on_load", "after_scroll", "after_interaction", "other_page", "not_on_page"];
 const BLOCKERS = ["cookie_wall", "modal", "login_wall", "paywall", "captcha", "age_gate", "region_block", "broken_page", "other"];
 
 export const AGENT_OUTPUT_SCHEMA = {
@@ -49,14 +49,14 @@ export function agentGoal(url: string, query: string): string {
     "You are testing how well an AI assistant that browses the web could answer a searcher's question using only this page.",
     `Question: "${query}"`,
     "Rules:",
-    `1. Stay on ${host}. Do not use search engines or visit other websites.`,
+    `1. Stay on this exact page (${url}). Do not open other pages, even on ${host}, and do not use search engines or other websites.`,
     "2. You may scroll, close cookie or newsletter pop-ups, and click tabs, accordions, 'read more' or 'show more' controls on this page.",
     "3. Do not log in, sign up, buy anything, or submit any form.",
     "Report:",
     "- answer_found: true only if this page itself answers the question.",
     "- answer_summary: the answer in one or two sentences, or null.",
     "- evidence_quote: copy one exact sentence from the page that supports the answer (40 words max), or null.",
-    "- answer_location: visible_on_load if readable without scrolling or clicking; after_scroll if you only had to scroll; after_interaction if you had to click or dismiss something first; not_on_page if absent.",
+    "- answer_location: visible_on_load if readable without scrolling or clicking; after_scroll if you only had to scroll; after_interaction if you had to click or dismiss something on this page first; other_page if this page only links to the answer; not_on_page if absent.",
     "- interactions_needed: each click or dismissal you needed, in order.",
     "- blockers: anything that blocked or covered content, with type and a short description.",
     "- page_purpose: one sentence on what the page is for.",

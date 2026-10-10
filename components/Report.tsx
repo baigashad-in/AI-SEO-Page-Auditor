@@ -21,6 +21,7 @@ const SOURCE_NAME = { fetch: "Fetch", browser: "Browser", search: "Search", agen
 const ANSWER_TEXT = {
   answered: "Answered",
   answered_with_effort: "Answered after clicks",
+  answered_elsewhere: "Only on another page",
   not_answered: "Not answered",
   unknown: "Not tested",
 };
@@ -282,7 +283,12 @@ export default function Report({ report: r }: { report: AuditReport }) {
           <h2>The agent&rsquo;s attempt</h2>
           <p>
             Asked to answer &ldquo;{r.query}&rdquo; using only this page. It {agent.answer_found ? "found an answer" : "did not find an answer"}
-            {agent.answer_found ? ` (${agent.answer_location.replace(/_/g, " ")})` : ""}.
+            {agent.answer_found
+              ? r.scores.answerability === "answered_elsewhere"
+                ? " on another page it opened, not on this one"
+                : ` (${agent.answer_location.replace(/_/g, " ")})`
+              : ""}
+            .
           </p>
           {agent.answer_summary && <p>{agent.answer_summary}</p>}
           {agent.evidence_quote && <blockquote className="quote">{agent.evidence_quote}</blockquote>}
