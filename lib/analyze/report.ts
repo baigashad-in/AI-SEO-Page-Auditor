@@ -2,7 +2,7 @@
 // connection, findings, and the "do today" list.
 
 import type { AuditReport, CallLog, Scores } from "../types";
-import { agentWasBlocked, blockerPhrase, buildFindings, buildStrengths, locateQuote, usableBrowser, type StageBundle } from "./findings";
+import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, buildFindings, buildStrengths, locateQuote, usableBrowser, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
 import { truncate } from "./text";
 import { displayUrl, rootDomain } from "../url";
@@ -97,7 +97,9 @@ export function computeScores(input: StageBundle): Scores {
     ? "unknown"
     : !a.answer_found
       ? "not_answered"
-      : a.answer_location === "visible_on_load" || a.answer_location === "after_scroll"
+      : answeredOnOtherPage(a) && !locateQuote(input).verified
+        ? "answered_elsewhere"
+        : a.answer_location === "visible_on_load" || a.answer_location === "after_scroll"
         ? "answered"
         : "answered_with_effort";
 
@@ -170,7 +172,7 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     const ratio = rawW / renW;
     if (ratio < 0.7)
       lines.push(
-        `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words; a browser shows ${renW}. ${pos ? `Your current #${pos} ranking is likely carried by Google, which renders JavaScript; ChatGPT, Claude and Perplexity are working from the ${rawW}-word version.` : "Those engines index the smaller version, which makes ranking and citation less likely."}`,
+        `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words; a browser shows ${renW}. ${pos ? `The page still ranks #${pos} in TinyFish Search, but ChatGPT, Claude and Perplexity crawlers work from the ${rawW}-word version.` : "Those engines index the smaller version, which makes ranking and citation less likely."}`,
       );
     else lines.push(`The server HTML already carries ${Math.round(ratio * 100)}% of the visible text, so crawlers that skip JavaScript see essentially the same page as users.`);
   }
@@ -202,9 +204,13 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     const where = a.answer_location.replace(/_/g, " ");
     const loc = locateQuote(input);
     if (!a.answer_found && agentWasBlocked(a)) {
-      lines.push(`An AI browsing agent asked "${q}" was blocked before it could read the page (${[...new Set(a.blockers.map(blockerPhrase))].join(", ")}).`);
+      lines.push(`An AI browsing agent looking for "${q}" was blocked before it could read the page (${[...new Set(a.blockers.map(blockerPhrase))].join(", ")}).`);
     } else if (!a.answer_found) {
-      lines.push(`An AI browsing agent asked "${q}" on the live page could not find an answer${a.missing_information.length ? `; it reported missing: ${a.missing_information.slice(0, 3).join("; ")}` : ""}.`);
+      lines.push(`An AI browsing agent looking for "${q}" on the live page could not find an answer${a.missing_information.length ? `; it reported missing: ${a.missing_information.slice(0, 3).join("; ")}` : ""}.`);
+    } else if (answeredOnOtherPage(a) && !loc.verified) {
+      lines.push(
+        `An AI browsing agent found an answer to "${q}" only on another page it opened (${a.interactions_needed.join(", then ") || "a linked page"}). This page itself does not contain it, so answer engines would cite the other page.`,
+      );
     } else if (a.evidence_quote && !loc.verified && a.answer_location === "after_interaction") {
       lines.push(`An AI browsing agent answered "${q}" only after interacting with the page (${a.interactions_needed.join(", then ") || "clicks"}); that text is not in what fetch tools or non-JavaScript crawlers receive.`);
     } else if (a.evidence_quote && !loc.verified) {

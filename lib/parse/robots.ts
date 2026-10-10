@@ -37,8 +37,15 @@ export interface ParsedRobots {
   reflowed: boolean; // line breaks were missing and were restored before parsing
 }
 
-const DIRECTIVE_AHEAD = /\s+(?=(?:user-agent|allow|disallow|sitemap|crawl-delay|host|clean-param|content-signal)\s*:)/gi;
-const DIRECTIVE = /(?:^|\s)(?:user-agent|allow|disallow|sitemap|crawl-delay|host|clean-param|content-signal)\s*:/gi;
+// Standard fields plus the non-standard ones seen in real files (License is the RSL licensing line,
+// Content-Signal is Cloudflare's, Content-Usage is the IETF AI preferences draft). Each one starts a
+// new line when line breaks are restored, so it is never glued onto the URL or path before it.
+const FIELDS = "user-agent|allow|disallow|sitemap|crawl-delay|host|clean-param|content-signal|content-usage|license|request-rate|visit-time|noindex";
+const DIRECTIVE_AHEAD = new RegExp(`\\s+(?=(?:${FIELDS})\\s*:)`, "gi");
+const DIRECTIVE = new RegExp(`(?:^|\\s)(?:${FIELDS})\\s*:`, "gi");
+
+/** Paths, product tokens and sitemap URLs never contain spaces, so anything after one is not part of the value. */
+const firstToken = (v: string) => v.split(/\s+/)[0] ?? "";
 
 /**
  * Restores line breaks when robots.txt arrives with its lines joined, as a markdown conversion can do:
@@ -69,7 +76,7 @@ export function parseRobots(input: string): ParsedRobots {
     const m = line.match(/^([A-Za-z-]+)\s*:\s*(.*)$/);
     if (!m) continue;
     const field = m[1].toLowerCase();
-    const value = m[2].trim();
+    const value = firstToken(m[2].trim());
     if (field === "user-agent") {
       validLines++;
       if (!current || !lastWasAgent) {
@@ -82,7 +89,7 @@ export function parseRobots(input: string): ParsedRobots {
     }
     if (field === "sitemap") {
       validLines++;
-      if (value) sitemaps.push(value);
+      if (/^https?:\/\/\S+$/i.test(value)) sitemaps.push(value);
       continue;
     }
     if ((field === "allow" || field === "disallow") && current) {

@@ -1,14 +1,15 @@
 // Text the report writes for the site owner: URLs, errors, drafts, wording taken from the page,
 // and how the agent's quote is matched. Cases follow live runs on all six demo pages.
 import { describe, expect, it } from "vitest";
-import { buildFindings, pageCasing, snippetDraft } from "../lib/analyze/findings";
+import { answeredOnOtherPage, buildFindings, pageCasing, snippetDraft, suggestDescription, withoutPageFraming } from "../lib/analyze/findings";
+import { AGENT_OUTPUT_SCHEMA, agentGoal } from "../lib/stages/agentStage";
 import { buildReport, domainList } from "../lib/analyze/report";
 import { reportToMarkdown } from "../lib/analyze/markdownReport";
 import { quoteAppearsIn } from "../lib/analyze/text";
 import { robotsVerdicts } from "../lib/parse/robots";
 import { displayUrl, oneLineError, pageUrlAfterRedirect } from "../lib/url";
 import type { FetchStageResult } from "../lib/types";
-import { agent, browserStage, bundle, fetchStage, REDDIT_URL, search } from "./helpers";
+import { agent, browserStage, bundle, fetchStage, LONG_TEXT, PAGE_URL, REDDIT_URL, search } from "./helpers";
 
 // Fetch result shaped like Reddit's r/SEO page: a title and no meta description.
 const redditFetch = (md: string, over: Partial<FetchStageResult> = {}) => fetchStage(md, over, REDDIT_URL, { title: "The SEO Authority", description: null });
@@ -147,5 +148,127 @@ describe("the robots.txt line in the summary", () => {
     const line = r.connection.find((l) => l.includes("search crawlers"))!;
     expect(line).toContain("as served to TinyFish");
     expect(line).toContain("The page still ranks");
+  });
+});
+
+describe("an agent that answers from another page (tinyfish.ai)", () => {
+  const quote = "TinyFish Web Agent is a web agent API for programmatic workflows that need to complete goals on live websites.";
+  const steps = [
+    "Click 'TinyAgent' from the Products dropdown to navigate to the agent page",
+    "Click the FAQ accordion 'What is TinyFish Web Agent, and is it a web agent API?' to expand the answer",
+  ];
+  const homepage = "<html><body><main><h1>The web stack for AI agents</h1><p>Search, extract, browse, and act on the web with one platform.</p></main></body></html>";
+  const b = () =>
+    bundle(
+      { fetch: fetchStage("Search, extract, browse, and act on the web with one platform."), browser: browserStage(homepage), agent: agent({ answer_location: "after_interaction", interactions_needed: steps, evidence_quote: quote }) },
+      undefined,
+      "web agent api",
+    );
+
+  it("says the answer is on another page instead of blaming a click on this one", () => {
+    const ids = buildFindings(b()).map((f) => f.id);
+    expect(ids).toContain("answer-other-page");
+    expect(ids).not.toContain("answer-hidden");
+    const r = buildReport(b(), { url: "https://example.com/page" });
+    expect(r.scores.answerability).toBe("answered_elsewhere");
+    expect(r.connection.join(" ")).toContain("only on another page it opened");
+    expect(r.strengths.join(" ")).not.toContain("answered the query");
+  });
+
+  it("asks the agent to stay on the exact page and offers an 'other page' answer", () => {
+    const goal = agentGoal("https://www.tinyfish.ai/", "web agent api");
+    expect(goal).toContain("Stay on this exact page (https://www.tinyfish.ai/). Do not open other pages");
+    expect(goal).toContain("other_page if this page only links to the answer");
+    expect((AGENT_OUTPUT_SCHEMA.properties.answer_location as { enum: string[] }).enum).toContain("other_page");
+  });
+
+  it("still treats in-page clicks as in-page", () => {
+    expect(answeredOnOtherPage({ ...agent({}).answer!, interactions_needed: ["Clicked the FAQ accordion to expand the answer"] })).toBe(false);
+  });
+});
+
+describe("description tags (react.dev has og:description but no meta description)", () => {
+  const og = "The library for web and native user interfaces";
+  const snippet = "This page will give you an introduction to 80% of the React concepts that you will use on a daily basis.";
+  const html = (head: string) => `<html><head><title>Quick Start - React</title>${head}</head><body><main><h1>Quick Start</h1><p>${LONG_TEXT}</p></main></body></html>`;
+  const ranked = () => search(1, { target: { position: 1, matchedUrl: PAGE_URL, serpTitle: null, serpSnippet: snippet } });
+
+  it("reports the missing tag instead of comparing the snippet with og:description", () => {
+    const page = html(`<meta property="og:description" content="${og}">`);
+    const all = buildFindings(bundle({ fetch: fetchStage(LONG_TEXT, {}, PAGE_URL, { description: og }), browser: browserStage(page), search: ranked(), query: "learn react" }));
+    const ogOnly = all.find((x) => x.id === "meta-description-og-only")!;
+    expect(ogOnly.severity).toBe("low");
+    expect(ogOnly.evidence.join(" ")).toContain(snippet.slice(0, 40));
+    expect(all.find((x) => x.id === "vis-snippet-rewritten")).toBeUndefined();
+    expect(all.find((x) => x.id === "meta-description-missing")).toBeUndefined();
+  });
+
+  it("still compares a real meta description with the snippet", () => {
+    const page = html(`<meta name="description" content="${og}"><meta property="og:description" content="${og}">`);
+    const all = buildFindings(bundle({ fetch: fetchStage(LONG_TEXT, {}, PAGE_URL, { description: og }), browser: browserStage(page), search: ranked(), query: "learn react" }));
+    expect(all.find((x) => x.id === "vis-snippet-rewritten")).toBeDefined();
+    expect(all.find((x) => x.id === "meta-description-og-only")).toBeUndefined();
+  });
+
+  it("confirms a missing description with the page HTML (Wikipedia)", () => {
+    const all = buildFindings(bundle({ fetch: fetchStage(LONG_TEXT, {}, PAGE_URL, { description: null }), browser: browserStage(html("")) }));
+    expect(all.find((x) => x.id === "meta-description-missing")!.evidence.join(" ")).toContain("no meta description tag either");
+  });
+
+  it("does not report a missing description that the page HTML has", () => {
+    const page = html(`<meta name="description" content="${og}">`);
+    const all = buildFindings(bundle({ fetch: fetchStage(LONG_TEXT, {}, PAGE_URL, { description: null }), browser: browserStage(page) }));
+    expect(all.find((x) => x.id === "meta-description-missing")).toBeUndefined();
+  });
+});
+
+describe("description drafts from the agent's summary", () => {
+  it("drops the 'this page is' lead-in", () => {
+    expect(withoutPageFraming("The react.dev/learn page is the official Quick Start guide.")).toBe("The official Quick Start guide.");
+    expect(withoutPageFraming("The page provides a Quick Start guide covering core concepts.")).toBe("A Quick Start guide covering core concepts.");
+    expect(withoutPageFraming("This page is the official React guide.")).toBe("The official React guide.");
+    expect(withoutPageFraming("The Medium Blog page is a hub.")).toBe("The Medium Blog page is a hub.");
+    expect(withoutPageFraming("React is a library for web and native user interfaces.")).toBe("React is a library for web and native user interfaces.");
+  });
+
+  it("uses the cleaned summary in the draft", () => {
+    const draft = suggestDescription("", null, "This page is the official React Quick Start guide that introduces components, JSX and state.", null);
+    expect(draft.startsWith("The official React Quick Start guide")).toBe(true);
+  });
+});
+
+describe("summary wording", () => {
+  it("does not credit Google for a TinyFish Search ranking (Medium)", () => {
+    const raw = `<html><head><title>Medium</title></head><body><p>Sign in Write Get app</p></body></html>`;
+    const rendered = `<html><head><title>The Medium Blog</title></head><body><p>Sign in Write Get app</p><p>${LONG_TEXT}</p></body></html>`;
+    const r = buildReport(bundle({ fetch: fetchStage("Sign in"), browser: browserStage(raw, rendered), search: search(2), query: "medium blog" }), { url: PAGE_URL, query: "medium blog" });
+    const line = r.connection.find((l) => l.startsWith("Non-JavaScript crawlers"))!;
+    expect(line).toContain("The page still ranks #2 in TinyFish Search");
+    expect(line).not.toContain("Google");
+  });
+
+  it("reads correctly when the agent was blocked (Reddit)", () => {
+    const blocked = agent({ answer_found: false, answer_summary: null, answer_location: "not_on_page", blockers: [{ type: "captcha", description: "A CAPTCHA covered the page." }] });
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: blocked, query: "seo subreddit" }), { url: PAGE_URL, query: "seo subreddit" });
+    expect(r.connection.join(" ")).toContain('An AI browsing agent looking for "seo subreddit" was blocked');
+  });
+
+  it("names full hosts so two results on one domain stay apart (Substack, Wikipedia)", () => {
+    const results = [
+      { position: 1, title: "a", url: "https://developers.google.com/search/docs", snippet: "", siteName: "" },
+      { position: 2, title: "b", url: "https://www.mtu.edu/seo", snippet: "", siteName: "" },
+    ];
+    const rank = buildFindings(bundle({ fetch: fetchStage(LONG_TEXT), search: search(3, { results }) })).find((x) => x.id === "vis-rank")!;
+    expect(rank.evidence[0]).toContain("Above you: #1 developers.google.com, #2 mtu.edu");
+  });
+});
+
+describe("edge-block evidence (Medium blocks three AI search user-agents)", () => {
+  it("names the bots that robots.txt allows in one line", () => {
+    const probe = (bot: string) => ({ bot, userAgent: bot, status: 403, words: 119, challenge: true, verdict: "blocked" as const });
+    const br = browserStage(`<html><body><p>${LONG_TEXT}</p></body></html>`, undefined, { botProbes: ["OAI-SearchBot", "Claude-SearchBot", "PerplexityBot"].map(probe) });
+    const edge = buildFindings(bundle({ fetch: fetchStage(LONG_TEXT), browser: br })).find((x) => x.evidence.some((e) => e.includes("server or CDN")))!;
+    const lines = edge.evidence.filter((e) => e.startsWith("robots.txt allows"));
+    expect(lines).toEqual(["robots.txt allows OAI-SearchBot, Claude-SearchBot and PerplexityBot, so this block happens at the server or CDN, not in robots.txt."]);
   });
 });

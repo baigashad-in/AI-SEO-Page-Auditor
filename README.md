@@ -49,7 +49,7 @@ const probe = await tfSearch({ query: pageTitle, includeDomains: [rootDomain(pag
 // Agent: can an AI agent answer the query on the live page? (lib/stages/agentStage.ts)
 const { run_id } = await tfStartAgentRun({
   url: pageUrl,
-  goal: agentGoal(pageUrl, query), // "Stay on this site... report answer_found, evidence_quote, answer_location..."
+  goal: agentGoal(pageUrl, query), // "Stay on this exact page... report answer_found, evidence_quote, answer_location..."
   output_schema: AGENT_OUTPUT_SCHEMA,
   browser_profile: "lite",
 });
@@ -146,7 +146,7 @@ Each connection line is built from observed numbers, for example "Non-JavaScript
 * **Structured data:** invalid JSON-LD, missing JSON-LD (with a pre-filled suggestion), Open Graph tags.
 * **Visibility:** rank, a different URL of the same site ranking instead, index probe, snippet rewritten away from your description.
 * **Content gaps:** phrases most top-ranking pages use and this page never does; depth and structure compared with them.
-* **Answerability:** the agent could not answer, or was blocked before reading the page; the answer is hidden behind a click or missing from what crawlers receive (checked only when the agent's quote is found on the page as written, so paraphrases never produce findings); overlays and walls in the way.
+* **Answerability:** the agent could not answer, or was blocked before reading the page; the answer is only on another page; the answer is hidden behind a click or missing from what crawlers receive (checked only when the agent's quote is found on the page as written, so paraphrases never produce findings); overlays and walls in the way.
 
 Every finding lists its evidence, which TinyFish API produced it, a confidence level, why it matters for visibility, and a fix with steps and copy-ready code where it applies.
 
@@ -177,7 +177,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 117 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
+npm test           # 141 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
 npm run typecheck
 ```
 

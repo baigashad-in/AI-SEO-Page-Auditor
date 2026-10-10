@@ -1,7 +1,7 @@
 // robots.txt from two sources (Fetch's markdown copy and the browser's plain-text copy), files whose
 // line breaks were lost, and files that close a site to every crawler.
 import { describe, expect, it } from "vitest";
-import { parseRobots, reflowRobots, robotsVerdicts } from "../lib/parse/robots";
+import { isAllowed, parseRobots, reflowRobots, robotsVerdicts } from "../lib/parse/robots";
 import { buildFindings } from "../lib/analyze/findings";
 import { withBrowserRobots } from "../lib/analyze/robotsSource";
 import type { BrowserStageResult, FetchStageResult } from "../lib/types";
@@ -120,5 +120,50 @@ describe("robots.txt that closes the site to every crawler", () => {
   it("suggests an Allow rule without the challenge query string", () => {
     const user = buildFindings(bundle({ fetch: fetchStage("text", { robots: closed() }, REDDIT_URL) }, REDDIT_URL)).find((x) => x.id === "access-robots-user-blocked")!;
     expect(user.fix.steps.join(" ")).toContain('add "Allow: /r/SEO/" to its group');
+  });
+});
+
+describe("newer robots.txt lines glued to the line before them", () => {
+  it("keeps License out of the sitemap URL (medium.com)", () => {
+    const joined = "User-Agent: GPTBot Disallow: / Allow: /about Sitemap: https://medium.com/sitemap/sitemap.xml License: https://medium.com/license.xml";
+    const p = parseRobots(joined);
+    expect(p.reflowed).toBe(true);
+    expect(p.sitemaps).toEqual(["https://medium.com/sitemap/sitemap.xml"]);
+  });
+
+  it("keeps a Content-Usage line out of the user-agent name", () => {
+    const p = parseRobots("User-agent: * Content-Usage: train-ai=n Allow: / Disallow: /private");
+    expect(isAllowed(p, "OAI-SearchBot", "/blog").allowed).toBe(true);
+    expect(isAllowed(p, "OAI-SearchBot", "/private/x").allowed).toBe(false);
+  });
+
+  it("reads only the first word of a path or sitemap value", () => {
+    const p = parseRobots("User-agent: *\nDisallow: /tmp License: https://x.example/l.xml\nSitemap: https://x.example/s.xml extra");
+    expect(isAllowed(p, "Googlebot", "/tmp/a").allowed).toBe(false);
+    expect(p.sitemaps).toEqual(["https://x.example/s.xml"]);
+  });
+
+  it("drops a sitemap line that is not a full URL", () => {
+    expect(parseRobots("User-agent: *\nDisallow:\nSitemap: /sitemap.xml").sitemaps).toEqual([]);
+  });
+});
+
+describe("on-demand fetchers in a file that closes the site (Reddit)", () => {
+  const closed = (): FetchStageResult["robots"] => {
+    const v = robotsVerdicts(CLOSED_ROBOTS, REDDIT_URL);
+    return { found: true, url: "https://www.reddit.com/robots.txt", note: "", verdicts: v.verdicts, sitemaps: [], status: "parsed" };
+  };
+  const notIndexed = { indexProbe: { query: "", found: false, position: null, domainUrls: [] } };
+
+  it("shares the low confidence of the search-crawler finding when the page ranks anyway", () => {
+    const b = bundle({ fetch: fetchStage("text", { robots: closed() }, REDDIT_URL), search: search(1, notIndexed, REDDIT_URL, "seo subreddit") }, REDDIT_URL, "seo subreddit");
+    const user = buildFindings(b).find((x) => x.id === "access-robots-user-blocked")!;
+    expect(user.confidence).toBe("low");
+    expect(user.evidence.join(" ")).toContain("served to TinyFish");
+  });
+
+  it("stays high confidence when the page is not found in search", () => {
+    const b = bundle({ fetch: fetchStage("text", { robots: closed() }, REDDIT_URL), search: search(null, notIndexed, REDDIT_URL, "seo subreddit") }, REDDIT_URL, "seo subreddit");
+    expect(buildFindings(b).find((x) => x.id === "access-robots-user-blocked")!.confidence).toBe("high");
   });
 });

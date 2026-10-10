@@ -2,8 +2,9 @@
 // Cases follow live runs on Medium, Substack and tinyfish.ai.
 import { describe, expect, it } from "vitest";
 import { markdownStats } from "../lib/parse/markdown";
-import { buildFindings, topicGaps } from "../lib/analyze/findings";
-import { agent, browserStage, bundle, fetchStage, PAGE_URL, search } from "./helpers";
+import { buildFindings, fetchMissedJsContent, sortFindings, topicGaps } from "../lib/analyze/findings";
+import type { Finding } from "../lib/types";
+import { agent, browserStage, bundle, fetchStage, LONG_TEXT, PAGE_URL, search } from "./helpers";
 
 describe("query words missing from the text", () => {
   it("rates a word that is in the title, on a page ranking #2, as low (Medium)", () => {
@@ -107,5 +108,68 @@ describe("blocker labels", () => {
     const finding = buildFindings(bundle({ agent: a })).find((x) => x.id === "answer-blocked")!;
     expect(finding.title).toContain("(a block page)");
     expect(finding.evidence.join(" ")).not.toContain("the agent called this");
+  });
+});
+
+describe("text that Fetch also misses because it only exists after JavaScript (medium.com/blog)", () => {
+  const nav = "Sign in Write Get app ".repeat(8);
+  const stories = Array.from({ length: 6 }, (_, i) => `<h2>Story number ${i} about writing</h2><p>${LONG_TEXT.slice(0, 1500)}</p>`).join("");
+  const raw = `<html><head><title>Medium</title></head><body><main><p>${nav}</p></main></body></html>`;
+  const rendered = `<html><head><title>The Medium Blog</title></head><body><main><p>${nav}</p>${stories}</main></body></html>`;
+  const jsHeadings = Array.from({ length: 6 }, (_, i) => `Story number ${i} about writing`);
+  const br = () => browserStage(raw, rendered, { onlyAfterJs: { headings: jsHeadings, title: false, description: false, canonical: false, h1: false, jsonLd: false } });
+  const thinMd = "Write\n\nSign in\n\n## The Medium Blog\n\nGet the best of Medium delivered to you weekly.";
+
+  it("reports one rendering problem instead of two extraction problems", () => {
+    const b = bundle({ fetch: fetchStage(thinMd), browser: br(), search: search(2), query: "medium blog" });
+    expect(fetchMissedJsContent(b)).toBe(true);
+    const all = buildFindings(b);
+    const js = all.find((x) => x.id === "render-js-dependent-content")!;
+    expect(js.severity).toBe("critical");
+    expect(js.evidence.join(" ")).toContain("no more than the raw HTML holds");
+    expect(js.sources).toContain("fetch");
+    expect(all.find((x) => x.id === "extract-content-lost")).toBeUndefined();
+    expect(all.find((x) => x.id === "extract-thin")).toBeUndefined();
+  });
+
+  it("still blames extraction when Fetch got more than the raw HTML", () => {
+    const md = `## The Medium Blog\n\n${"Writers share stories about craft and tools every week. ".repeat(20)}`;
+    const b = bundle({ fetch: fetchStage(md), browser: br(), search: search(2), query: "medium blog" });
+    expect(fetchMissedJsContent(b)).toBe(false);
+    const all = buildFindings(b);
+    expect(all.find((x) => x.id === "extract-content-lost")!.title).toContain("of the visible text");
+    expect(all.find((x) => x.id === "extract-thin")).toBeDefined();
+  });
+
+  it("rates a raw title that JavaScript only lengthens as medium", () => {
+    const b = bundle({ fetch: fetchStage(thinMd), browser: br(), search: search(2), query: "medium blog" });
+    const tags = buildFindings(b).find((x) => x.id === "render-tags-js-only")!;
+    expect(tags.severity).toBe("medium");
+    expect(tags.evidence[0]).toContain("shorter, less specific title");
+  });
+
+  it("keeps a placeholder title that JavaScript replaces as high", () => {
+    const body = `<body><main><p>${LONG_TEXT}</p></main></body>`;
+    const b = bundle({ browser: browserStage(`<html><head><title>Loading</title></head>${body}</html>`, `<html><head><title>Pricing | Acme</title></head>${body}</html>`) });
+    expect(buildFindings(b).find((x) => x.id === "render-tags-js-only")!.severity).toBe("high");
+  });
+});
+
+describe("order of findings with the same severity (Reddit)", () => {
+  const f = (id: string, confidence: Finding["confidence"], effort: Finding["fix"]["effort"]): Finding => ({
+    id,
+    category: "access",
+    severity: "high",
+    confidence,
+    title: id,
+    evidence: [],
+    visibilityImpact: "",
+    fix: { summary: "", steps: [], effort },
+    sources: [],
+  });
+
+  it("puts confirmed findings before quick fixes the evidence only suggests", () => {
+    const sorted = sortFindings([f("robots-low", "low", "minutes"), f("agent-medium", "medium", "hours"), f("challenge-high", "high", "hours")]);
+    expect(sorted.map((x) => x.id)).toEqual(["challenge-high", "agent-medium", "robots-low"]);
   });
 });

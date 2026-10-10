@@ -13,7 +13,7 @@ import type {
 } from "../types";
 import { markdownToPlain } from "../parse/markdown";
 import { containsTerm, contentTokens, normForMatch, phraseSet, queryCoverage, quoteAppearsIn, stem, truncate } from "./text";
-import { displayUrl, oneLineError, rootDomain, sameUrl } from "../url";
+import { bareHost, displayUrl, oneLineError, rootDomain, sameUrl } from "../url";
 import { fetchErrorHelp } from "./fetchErrors";
 import { AI_BOTS } from "../parse/robots";
 
@@ -29,13 +29,15 @@ export interface StageBundle {
 
 const SEV_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 const EFFORT_RANK = { minutes: 0, hours: 1, days: 2 } as const;
+const CONF_RANK = { high: 0, medium: 1, low: 2 } as const;
 
+/** Severity first; within a severity, what the evidence confirms comes before quick wins it only suggests. */
 export function sortFindings(f: Finding[]): Finding[] {
   return [...f].sort(
     (a, b) =>
       SEV_RANK[a.severity] - SEV_RANK[b.severity] ||
-      EFFORT_RANK[a.fix.effort] - EFFORT_RANK[b.fix.effort] ||
-      (a.confidence === "high" ? 0 : 1) - (b.confidence === "high" ? 0 : 1),
+      CONF_RANK[a.confidence] - CONF_RANK[b.confidence] ||
+      EFFORT_RANK[a.fix.effort] - EFFORT_RANK[b.fix.effort],
   );
 }
 
@@ -125,8 +127,19 @@ export function snippetDraft(snippet: string | null | undefined): string | null 
   return s.split(/\s+/).length >= 8 ? s : null;
 }
 
+/**
+ * Agent summaries talk about the page ("The react.dev/learn page is the official..."); a description
+ * should speak as the page, so the lead-in is dropped: "The official...".
+ */
+export function withoutPageFraming(s: string): string {
+  const m = s.match(/^(?:this|the)\s+(?:[\w./:-]+\s+)?(?:web\s*)?page\s+(?:is|provides|offers|contains|gives|presents|serves as)\s+(.+)$/i);
+  if (!m) return s;
+  const rest = m[1];
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
+
 export function suggestDescription(markdown: string, h1: string | null, agentAnswer?: string | null, searchSnippet?: string | null): string {
-  if (agentAnswer && agentAnswer.split(/\s+/).length >= 8) return fitToLength(agentAnswer).replace(/"/g, "'");
+  if (agentAnswer && agentAnswer.split(/\s+/).length >= 8) return fitToLength(withoutPageFraming(agentAnswer.trim())).replace(/"/g, "'");
   // The engine's own snippet describes the page better than the first paragraph of a feed or listing.
   const snip = snippetDraft(searchSnippet);
   if (snip) return fitToLength(snip).replace(/"/g, "'");
@@ -256,8 +269,14 @@ function accessChecks(b: StageBundle, out: Finding[]) {
   if (f) {
     const path = pagePath(f.page?.finalUrl || b.url);
     const blockedSearch = f.robots.verdicts.filter((v) => !v.allowed && (v.bot.purpose === "ai_search" || v.bot.purpose === "classic_search"));
+    // A page that robots.txt closes to Googlebot but that ranks or is indexed anyway: the site likely
+    // serves verified crawlers a different robots.txt (or has an agreement with them), or the rule is
+    // newer than the index. The file is real, but what it means for each crawler is uncertain.
+    const pos = b.search?.target.position ?? null;
+    const classic = blockedSearch.some((v) => v.bot.purpose === "classic_search");
+    const indexedAnyway = classic && (pos !== null || !!b.search?.indexProbe.found);
+    const sameFileCaveat = `This is the robots.txt served to TinyFish; the site may serve verified crawlers a different one, have agreements with some engines, or have added the rule after the page was indexed.`;
     if (blockedSearch.length) {
-      const classic = blockedSearch.some((v) => v.bot.purpose === "classic_search");
       const starGroup = blockedSearch.filter((v) => v.matchedGroup === "*").map((v) => v.bot.token);
       const ownGroup = blockedSearch.filter((v) => v.matchedGroup !== "*");
       const code = [
@@ -266,11 +285,6 @@ function accessChecks(b: StageBundle, out: Finding[]) {
           : []),
         ...ownGroup.map((v) => `# In the existing "User-agent: ${v.matchedGroup}" group, remove or narrow:\n#   ${v.matchedRule}\n# or add this more specific rule to that group:\nAllow: ${path}`),
       ].join("\n");
-      // A page that robots.txt closes to Googlebot but that ranks or is indexed anyway: the site likely
-      // serves verified crawlers a different robots.txt (or has an agreement with them), or the rule is
-      // newer than the index. The file is real, but what it means for search is uncertain.
-      const pos = b.search?.target.position ?? null;
-      const indexedAnyway = classic && (pos !== null || !!b.search?.indexProbe.found);
       out.push({
         id: "access-robots-search-blocked",
         category: "access",
@@ -281,7 +295,7 @@ function accessChecks(b: StageBundle, out: Finding[]) {
           ...blockedSearch.map((v) => `${v.bot.token} (${v.bot.operator}): blocked by "${v.matchedRule}" in group "User-agent: ${v.matchedGroup}". ${v.bot.note}`),
           ...(indexedAnyway
             ? [
-                `Yet the page ${pos !== null ? `ranks #${pos} for "${b.search!.query}"` : "is in the search index"}, so search engines still reach it. This is the robots.txt served to TinyFish; the site may serve verified crawlers a different one, have agreements with some engines, or have added the rule after the page was indexed.`,
+                `Yet the page ${pos !== null ? `ranks #${pos} for "${b.search!.query}"` : "is in the search index"}, so search engines still reach it. ${sameFileCaveat}`,
               ]
             : []),
         ],
@@ -298,9 +312,13 @@ function accessChecks(b: StageBundle, out: Finding[]) {
         id: "access-robots-user-blocked",
         category: "access",
         severity: "medium",
-        confidence: "high",
+        // Same file as the search-crawler finding, so the same doubt applies when the page ranks anyway.
+        confidence: indexedAnyway ? "low" : "high",
         title: `robots.txt blocks on-demand fetches by ${blockedUser.map((v) => v.bot.token).join(", ")}`,
-        evidence: blockedUser.map((v) => `${v.bot.token}: "${v.matchedRule}" (group ${v.matchedGroup})`),
+        evidence: [
+          ...blockedUser.map((v) => `${v.bot.token}: "${v.matchedRule}" (group ${v.matchedGroup})`),
+          ...(indexedAnyway ? [`The page ranks or is indexed despite this file blocking Googlebot. ${sameFileCaveat}`] : []),
+        ],
         visibilityImpact: "When a user pastes this URL or asks about it, the assistant will not retrieve the page, so it answers from other sources.",
         fix: { summary: "Allow user-initiated fetchers unless you have a reason not to", steps: blockedUser.map((v) => `Remove "${v.matchedRule}" for ${v.bot.token}, or add "Allow: ${path}" to its group.`), effort: "minutes" },
         sources: ["fetch"],
@@ -379,12 +397,16 @@ function accessChecks(b: StageBundle, out: Finding[]) {
     const badSearch = bad.filter((p) => purposeOf(p.bot) !== "training");
     const badTraining = bad.filter((p) => purposeOf(p.bot) === "training");
     const robotsAllows = f?.robots.status === "unreadable" ? [] : (f?.robots.verdicts.filter((v) => v.allowed).map((v) => v.bot.token) ?? []);
-    const evidenceFor = (list: typeof bad) => [
-      `Normal browser request: HTTP ${br.status}, ${br.raw?.words ?? 0} words in raw HTML.`,
-      ...list.map((p) => `${p.bot} user-agent: HTTP ${p.status ?? "error"}, ${p.words} words${p.challenge ? ", bot challenge page" : ""} (${p.verdict}).`),
-      ...list.filter((p) => robotsAllows.includes(p.bot)).map((p) => `robots.txt allows ${p.bot}, so this block happens at the server or CDN, not in robots.txt.`),
-      "Caveat: requests came from a TinyFish residential IP with representative user-agent strings. Real crawlers use verified IP ranges and may be treated differently.",
-    ];
+    const evidenceFor = (list: typeof bad) => {
+      const allowedBots = list.filter((p) => robotsAllows.includes(p.bot)).map((p) => p.bot);
+      const names = allowedBots.length > 1 ? `${allowedBots.slice(0, -1).join(", ")} and ${allowedBots[allowedBots.length - 1]}` : allowedBots[0];
+      return [
+        `Normal browser request: HTTP ${br.status}, ${br.raw?.words ?? 0} words in raw HTML.`,
+        ...list.map((p) => `${p.bot} user-agent: HTTP ${p.status ?? "error"}, ${p.words} words${p.challenge ? ", bot challenge page" : ""} (${p.verdict}).`),
+        allowedBots.length ? `robots.txt allows ${names}, so this block happens at the server or CDN, not in robots.txt.` : "",
+        "Caveat: requests came from a TinyFish residential IP with representative user-agent strings. Real crawlers use verified IP ranges and may be treated differently.",
+      ].filter(Boolean);
+    };
     if (badSearch.length) {
       out.push({
         id: "access-edge-blocks-ai-bots",
@@ -531,6 +553,19 @@ function accessChecks(b: StageBundle, out: Finding[]) {
   }
 }
 
+/**
+ * True when most of the page text arrives through JavaScript and Fetch extracted no more than the
+ * server HTML holds (Medium's blog: 49 raw words, 1659 rendered, 22 extracted). Fetch then saw the
+ * pre-JavaScript page, so the missing text is a rendering problem, not text the extractor threw away.
+ */
+export function fetchMissedJsContent(b: StageBundle): boolean {
+  const br = b.browser;
+  const words = b.fetch?.stats?.words;
+  if (!br?.ok || !br.raw || !br.rendered || br.rawChallenge || words == null) return false;
+  if (br.rendered.words < 80 || br.raw.words / br.rendered.words >= 0.7) return false;
+  return words <= br.raw.words * 1.25 + 20;
+}
+
 function renderingChecks(b: StageBundle, out: Finding[]) {
   const br = b.browser;
   if (!br?.ok || !br.raw || !br.rendered) return;
@@ -551,6 +586,7 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
     const nothingWithoutJs = raw.emptyAppShell || raw.words < 30;
     const severity: Severity =
       nothingWithoutJs || (ratio < 0.3 && jsOnlyWords >= 150) ? "critical" : jsOnlyWords >= 150 ? "high" : "medium";
+    const fetchMissed = fetchMissedJsContent(b);
     out.push({
       id: "render-js-dependent-content",
       category: "rendering",
@@ -561,14 +597,15 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
         `Raw server HTML: ${raw.words} words. Rendered DOM: ${ren.words} words.`,
         severity === "medium" ? `JavaScript adds ${jsOnlyWords} words, which is a small amount in absolute terms.` : "",
         raw.emptyAppShell ? "The raw HTML is an empty app shell (a root div with almost no text)." : "",
-        br.onlyAfterJs.headings.length ? `Headings missing from raw HTML: ${br.onlyAfterJs.headings.slice(0, 5).map((h) => `"${h}"`).join(", ")}` : "",
+        fetchMissed ? `TinyFish Fetch extracted ${b.fetch!.stats!.words} words, no more than the raw HTML holds, so fetch-based AI tools miss this text too.` : "",
+        br.onlyAfterJs.headings.length ? `Headings missing from raw HTML: ${[...new Set(br.onlyAfterJs.headings)].slice(0, 5).map((h) => `"${h}"`).join(", ")}` : "",
         termsOnlyAfterJs.length ? `Query words only present after JavaScript: ${shown(b.query, termsOnlyAfterJs)}` : "",
         raw.frameworkHints.length ? `Detected stack: ${raw.frameworkHints.join(", ")}` : "",
       ].filter(Boolean),
       visibilityImpact:
         "GPTBot, ClaudeBot and PerplexityBot fetch HTML but do not execute JavaScript (Vercel crawler study, Dec 2024). They see the raw HTML only, so this content cannot be indexed or cited by those engines. Googlebot and Gemini do render JavaScript, but later and less reliably.",
       fix: { summary: "Put the main content in the server HTML", steps: [ssrAdvice(raw.frameworkHints), "Verify with: curl -s URL | grep \"a sentence from your page\"", "Re-run this audit; raw and rendered word counts should be close."], effort: "days" },
-      sources: ["browser"],
+      sources: fetchMissed ? ["browser", "fetch"] : ["browser"],
     });
   } else if (termsOnlyAfterJs.length) {
     out.push({
@@ -587,6 +624,9 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
   const js = br.onlyAfterJs;
   // A title that JavaScript rewrites (e.g. "Loading" -> "Pricing | Acme") is as bad as a missing one for non-JS crawlers.
   const titleRewritten = !!raw.title && !!ren.title && normForMatch(raw.title) !== normForMatch(ren.title);
+  // "Medium" -> "The Medium Blog" still gives crawlers a real, shorter title; a placeholder that has
+  // nothing in common with the final title ("Loading", "React App") is the serious case.
+  const titleNarrowed = titleRewritten && normForMatch(ren.title!).includes(normForMatch(raw.title!));
   const lateTags = [
     js.title ? "<title>" : "",
     titleRewritten ? "<title> text" : "",
@@ -599,12 +639,12 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
     out.push({
       id: "render-tags-js-only",
       category: "rendering",
-      severity: js.title || titleRewritten || js.canonical || js.h1 ? "high" : "medium",
+      severity: js.title || (titleRewritten && !titleNarrowed) || js.canonical || js.h1 ? "high" : "medium",
       confidence: "high",
       title: `Key tags only exist after JavaScript: ${lateTags.join(", ")}`,
       evidence: lateTags.map((t) =>
         t === "<title> text"
-          ? `<title> in raw HTML is "${truncate(raw.title, 80)}"; JavaScript changes it to "${truncate(ren.title, 80)}"`
+          ? `<title> in raw HTML is "${truncate(raw.title, 80)}"; JavaScript changes it to "${truncate(ren.title, 80)}"${titleNarrowed ? ", so crawlers that skip JavaScript get the shorter, less specific title" : ""}`
           : `${t}: missing in raw HTML, present in rendered DOM`,
       ),
       visibilityImpact: "Crawlers that do not run JavaScript see a page without these signals, so titles, canonicals and structured data are ignored by them.",
@@ -622,35 +662,39 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
   const md = f.page.markdown;
   const extractedText = markdownToPlain(md);
 
-  // Content lost by extraction
-  if (ren && ren.words >= 300) {
+  // Content lost by extraction. When Fetch only saw the pre-JavaScript page, measure it against the
+  // server HTML: text that JavaScript adds later belongs to the rendering finding, and blaming the
+  // extractor (with <main> advice) would send the fix to the wrong place.
+  const preJs = fetchMissedJsContent(b);
+  const base = preJs ? b.browser!.raw! : ren;
+  if (base && base.words >= 300) {
     const mdNorm = ` ${normForMatch(extractedText)} `;
-    const lostHeadings = ren.headings
+    const lostHeadings = base.headings
       .filter((h) => h.level <= 3)
       .map((h) => h.text)
       .filter((t) => {
         const n = normForMatch(t);
         return n.split(" ").length >= 2 && !mdNorm.includes(` ${n} `);
       });
-    const ratio = s.words / ren.words;
+    const ratio = s.words / base.words;
     if (ratio < 0.35 || lostHeadings.length >= 3) {
       out.push({
         id: "extract-content-lost",
         category: "extraction",
         severity: ratio < 0.2 || lostHeadings.length >= 5 ? "high" : "medium",
         confidence: "medium",
-        title: `AI extraction keeps ${pct(s.words, ren.words)} of the visible text`,
+        title: `AI extraction keeps ${pct(s.words, base.words)} of the ${preJs ? "server HTML text" : "visible text"}`,
         evidence: [
-          `Fetch extracted ${s.words} words; the rendered page has ${ren.words} words (navigation and footer included).`,
+          `Fetch extracted ${s.words} words; the ${preJs ? "raw server HTML has" : "rendered page has"} ${base.words} words (navigation and footer included).`,
           lostHeadings.length ? `Sections dropped by extraction: ${lostHeadings.slice(0, 6).map((h) => `"${h}"`).join(", ")}` : "",
-          `Semantic containers: <main> ${ren.hasMain ? "present" : "missing"}, <article> ${ren.hasArticle ? "present" : "missing"}.`,
+          `Semantic containers: <main> ${base.hasMain ? "present" : "missing"}, <article> ${base.hasArticle ? "present" : "missing"}.`,
         ].filter(Boolean),
         visibilityImpact: "Extractors remove what looks like boilerplate. Sections they drop are not available to the AI tool that is answering a question about your page.",
         fix: {
           summary: "Make the main content easy to identify",
           steps: [
-            !ren.hasMain ? "Wrap the primary content in a single <main> element." : "Keep all primary content inside <main>.",
-            !ren.hasArticle && articleLike(b) ? "Wrap the article body in <article>." : "",
+            !base.hasMain ? "Wrap the primary content in a single <main> element." : "Keep all primary content inside <main>.",
+            !base.hasArticle && articleLike(b) ? "Wrap the article body in <article>." : "",
             "Move key text out of carousels, sliders, tab widgets and <aside> elements, or render it as normal <section> content with <h2> headings.",
           ].filter(Boolean),
           effort: "hours",
@@ -664,7 +708,10 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
   const comps = b.search?.competitors.filter((c) => c.fetched && c.stats) || [];
   const compWords = comps.map((c) => c.stats!.words).sort((a, b2) => a - b2);
   const median = compWords.length ? compWords[Math.floor(compWords.length / 2)] : null;
-  if (s.words < 300) {
+  // The page already has the text but serves it only through JavaScript: the rendering finding owns
+  // that (with the Fetch word count as evidence), and "add more text" would be the wrong fix.
+  const textExistsAfterJs = preJs && !!ren && ren.words >= 300;
+  if (s.words < 300 && !textExistsAfterJs) {
     // Pages that rank with even less text show that length is not what holds this page back.
     const notBehind = median !== null && s.words >= median;
     out.push({
@@ -698,18 +745,54 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
       sources: ["fetch"],
     });
   }
-  if (!f.page.description) {
-    const draft = suggestDescription(md, ren?.h1[0] ?? null, agentSummary(b), b.search?.target.serpSnippet);
+  // Fetch's description is the meta description or, failing that, og:description. The browser's HTML
+  // tells the two apart; it is null here when the browser got a challenge page instead.
+  const metaTag = ren ? ren.metaDescription || b.browser?.raw?.metaDescription || null : undefined;
+  const ogDesc = ren?.og.description || b.browser?.raw?.og.description || null;
+  const serpSnippet = b.search?.target.serpSnippet ?? null;
+  if (!f.page.description && !metaTag) {
+    const draft = suggestDescription(md, ren?.h1[0] ?? null, agentSummary(b), serpSnippet);
     out.push({
       id: "meta-description-missing",
       category: "metadata",
       severity: "medium",
       confidence: "high",
       title: "No meta description extracted",
-      evidence: ["Fetch returned description: null (no og:description or meta description)."],
+      evidence: [
+        "Fetch returned description: null (no og:description or meta description).",
+        metaTag === null ? "The page HTML (raw and rendered) has no meta description tag either." : "",
+      ].filter(Boolean),
       visibilityImpact: "Without a description, search engines and AI tools write their own summary from whatever text they find first.",
       fix: { summary: "Add a meta description (drafted from your page)", steps: ["Edit the draft below so it states what the page offers in under 155 characters."], code: `<meta name="description" content="${draft}">\n<meta property="og:description" content="${draft}">`, effort: "minutes" },
-      sources: ["fetch"],
+      sources: metaTag === null ? ["fetch", "browser"] : ["fetch"],
+    });
+  } else if (metaTag === null && ogDesc) {
+    // react.dev leaves the tag out of its docs pages on purpose ("Let Google figure out a good
+    // description for each page"); its og:description is a generic site line.
+    const draft = suggestDescription(md, ren?.h1[0] ?? null, agentSummary(b), serpSnippet);
+    out.push({
+      id: "meta-description-og-only",
+      category: "metadata",
+      severity: "low",
+      confidence: "high",
+      title: "No meta description tag, only og:description",
+      evidence: [
+        `No <meta name="description"> in the raw or rendered HTML.`,
+        `og:description: "${truncate(ogDesc, 160)}"`,
+        serpSnippet ? `Snippet search shows for this page: "${truncate(serpSnippet, 160)}"` : "",
+      ].filter(Boolean),
+      visibilityImpact:
+        "Search engines write the snippet from page text when there is no meta description; Google's snippet documentation names the meta description tag, not og:description. Leaving it out can be deliberate, so each snippet matches the query.",
+      fix: {
+        summary: "Optional: add a meta description if the shown snippet is weak",
+        steps: [
+          serpSnippet ? "If the snippet shown above describes the page well, no change is needed." : "If search snippets for this page read well, no change is needed.",
+          "Otherwise add a meta description that says what this page offers, under 155 characters (draft below).",
+        ],
+        code: `<meta name="description" content="${draft}">`,
+        effort: "minutes",
+      },
+      sources: ["browser", "fetch"],
     });
   }
   const pageTitle = ren?.title || f.page.title;
@@ -938,7 +1021,7 @@ function visibilityChecks(b: StageBundle, out: Finding[]) {
   if (!s || s.pagesChecked === 0) return;
   const dominant = s.target.position === null ? dominantDomain(s, b.url) : null;
   const depth = s.pagesChecked * 10;
-  const topNames = s.results.slice(0, 3).map((r) => `#${r.position} ${rootDomain(r.url) || r.siteName}`).join(", ");
+  const topNames = s.results.slice(0, 3).map((r) => `#${r.position} ${bareHost(r.url) || r.siteName}`).join(", ");
 
   if (s.target.position === null) {
     const otherUrl = s.domain.urls[0];
@@ -991,7 +1074,7 @@ function visibilityChecks(b: StageBundle, out: Finding[]) {
       severity: pos <= 3 ? "info" : pos <= 10 ? "low" : "medium",
       confidence: "medium",
       title: `Ranks #${pos} for "${s.query}"`,
-      evidence: [`TinyFish Search (${s.location}). Above you: ${s.results.filter((r) => r.position < pos).slice(0, 3).map((r) => `#${r.position} ${rootDomain(r.url)}`).join(", ") || "nobody"}.`],
+      evidence: [`TinyFish Search (${s.location}). Above you: ${s.results.filter((r) => r.position < pos).slice(0, 3).map((r) => `#${r.position} ${bareHost(r.url)}`).join(", ") || "nobody"}.`],
       visibilityImpact: pos <= 3 ? "Top results are the ones AI search tools most often read and cite." : "AI search tools tend to read only the first few results. Moving up matters more than in classic search.",
       fix: { summary: pos <= 3 ? "Protect the position" : "Move into the top 3", steps:
           pos <= 3
@@ -1003,7 +1086,11 @@ function visibilityChecks(b: StageBundle, out: Finding[]) {
       sources: ["search"],
     });
 
-    const desc = b.browser?.rendered?.metaDescription || b.fetch?.page?.description;
+    // Only a real meta description tag is compared. With browser HTML available and no tag, Fetch's
+    // description is og:description, which snippets do not come from (see meta-description-og-only).
+    const desc = b.browser?.rendered
+      ? b.browser.rendered.metaDescription || b.browser.raw?.metaDescription || null
+      : b.fetch?.page?.description;
     if (desc && s.target.serpSnippet) {
       const dTok = new Set(contentTokens(desc).map(stem));
       const sTok = contentTokens(s.target.serpSnippet).map(stem);
@@ -1151,7 +1238,7 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
       confidence: "medium",
       title: `${gaps.length} topics the ${whom} cover and this page does not`,
       evidence: [
-        `Compared with: ${comps.map((c) => `#${c.position} ${rootDomain(c.url)}`).join(", ")}`,
+        `Compared with: ${comps.map((c) => `#${c.position} ${bareHost(c.url)}`).join(", ")}`,
         `Missing from your extracted text: ${gaps.map(([t, v]) => `${t} (${v.n}/${comps.length})`).join(", ")}`,
       ],
       visibilityImpact: "These are the words and sub-topics that searchers' queries and AI answers draw on. Pages that cover them match more question variants.",
@@ -1169,7 +1256,7 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
       severity: "medium",
       confidence: "medium",
       title: `The ${whom} give AI tools ${Math.round(median / Math.max(f.stats.words, 1))}x more text`,
-      evidence: comps.map((c) => `#${c.position} ${rootDomain(c.url)}: ${c.stats!.words} words, ${c.stats!.headings.length} headings, ${c.stats!.listItems} list items, ${c.stats!.tableRows} table rows`).concat([`You: ${f.stats.words} words, ${f.stats.headings.length} headings`]),
+      evidence: comps.map((c) => `#${c.position} ${bareHost(c.url)}: ${c.stats!.words} words, ${c.stats!.headings.length} headings, ${c.stats!.listItems} list items, ${c.stats!.tableRows} table rows`).concat([`You: ${f.stats.words} words, ${f.stats.headings.length} headings`]),
       visibilityImpact: "Length is not a ranking factor by itself, but depth usually means more answered sub-questions and more quotable passages.",
       fix: { summary: "Add depth where it answers real questions", steps: ["Use the agent's missing-information list and the topic gaps as the outline for new sections."], effort: "hours" },
       sources: ["search", "fetch"],
@@ -1184,7 +1271,7 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
       severity: "low",
       confidence: "medium",
       title: `The ${whom} use lists and tables; this page is mostly prose`,
-      evidence: comps.map((c) => `#${c.position} ${rootDomain(c.url)}: ${c.stats!.listItems} list items, ${c.stats!.tableRows} table rows`).concat([`You: ${f.stats.listItems} list items, ${f.stats.tableRows} table rows`]),
+      evidence: comps.map((c) => `#${c.position} ${bareHost(c.url)}: ${c.stats!.listItems} list items, ${c.stats!.tableRows} table rows`).concat([`You: ${f.stats.listItems} list items, ${f.stats.tableRows} table rows`]),
       visibilityImpact: "Lists and tables extract cleanly and are easy to quote as steps, comparisons and specs.",
       fix: { summary: "Turn steps, specs and comparisons into real HTML lists and tables", steps: ["Use <ol>/<ul> and <table>, not styled <div>s."], effort: "hours" },
       sources: ["search", "fetch"],
@@ -1241,6 +1328,14 @@ export function agentWasBlocked(a: AgentAnswer): boolean {
   return a.blockers.some(
     (x) => ["captcha", "login_wall", "paywall", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
   );
+}
+
+// Steps that mean the agent left the audited page (rule 1 of its goal says not to, but agents can).
+const LEFT_PAGE = /navigat(?:e|ed|ing) to|went to (?:the|a|another)|opened (?:the|a|another) [\w' -]*page|go(?:ne)? to the [\w' -]*page|another page|different page|followed (?:the|a) link/i;
+
+/** True when the agent's answer came from another page than the one audited. */
+export function answeredOnOtherPage(a: AgentAnswer): boolean {
+  return a.answer_location === "other_page" || LEFT_PAGE.test(a.interactions_needed.join(" "));
 }
 
 /** Where the agent's quote can be found. "unverified" means it is not on the page as written (a paraphrase). */
@@ -1310,6 +1405,32 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
       fix: { summary: "Add the missing answer", steps: a.missing_information.length ? a.missing_information.map((m) => `Add: ${m}`) : [`Add a section that directly answers "${b.query}".`], effort: "hours" },
       sources: ["agent"],
     });
+  } else if (answeredOnOtherPage(a) && !verified) {
+    // The agent opened another page and answered from there. This page does not hold the answer, so
+    // "hidden behind a click" advice would point at the wrong page.
+    out.push({
+      id: "answer-other-page",
+      category: "answerability",
+      severity: b.queryDerived ? "low" : "medium",
+      confidence: "medium",
+      title: `The answer to "${truncate(b.query, 60)}" is on another page, not this one`,
+      evidence: [
+        `Agent's steps: ${a.interactions_needed.join(" > ") || "opened a linked page"}`,
+        a.evidence_quote ? `Agent's evidence (from the other page): "${truncate(a.evidence_quote, 200)}"` : "",
+        "The quote is not in this page's Fetch extraction, raw HTML or rendered page.",
+      ].filter(Boolean),
+      visibilityImpact:
+        "Search and AI answer tools retrieve and quote one page at a time. For this query they need the page that holds the answer, so this page is unlikely to be the one cited.",
+      fix: {
+        summary: "Answer the query here, or point the query at the page that does",
+        steps: [
+          `Add a short, direct answer to "${b.query}" near the top of this page, in the server HTML.`,
+          "Or treat the linked page as the target for this query: audit it, and link to it from here using the query words.",
+        ],
+        effort: "hours",
+      },
+      sources: ["agent", "fetch", "browser"],
+    });
   } else if (a.evidence_quote && !verified && a.answer_location === "after_interaction") {
     // Content revealed by a click is expected to be missing from the page as loaded. Report it, but
     // with low confidence: the agent may also have paraphrased.
@@ -1338,7 +1459,8 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
     });
   } else if (a.evidence_quote && verified) {
     // Only a quote that is really on the page can say who receives it. Paraphrases are skipped.
-    const hidden = a.answer_location === "after_interaction";
+    // An agent that wandered off and came back with text that is also on this page did not need a click.
+    const hidden = a.answer_location === "after_interaction" && !answeredOnOtherPage(a);
     if (inFetch === false || inRaw === false || hidden) {
       let severity: Severity = "low";
       let title = "";
@@ -1571,6 +1693,6 @@ export function buildStrengths(input: StageBundle): string[] {
   if (f?.stats && f.stats.words >= 600 && f.stats.headings.length >= 3) s.push(`Extraction is substantial and structured: ${f.stats.words} words under ${f.stats.headings.length} headings.`);
   if (br?.rendered && br.rendered.jsonLd.blocks > 0 && br.rendered.jsonLd.parseErrors === 0) s.push(`Valid structured data: ${br.rendered.jsonLd.types.join(", ") || "JSON-LD present"}.`);
   if (b.search?.target.position && b.search.target.position <= 3) s.push(`Ranks #${b.search.target.position} for "${b.search.query}".`);
-  if (b.agent?.answer?.answer_found && b.agent.answer.answer_location === "visible_on_load") s.push("An AI agent answered the query from content visible on load.");
+  if (b.agent?.answer?.answer_found && b.agent.answer.answer_location === "visible_on_load" && !answeredOnOtherPage(b.agent.answer)) s.push("An AI agent answered the query from content visible on load.");
   return s;
 }
