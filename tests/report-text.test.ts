@@ -424,3 +424,20 @@ describe("lists in summary lines and titles", () => {
     expect(buildReport(bundle({ fetch: fetchStage(LONG_TEXT), search: short }), { url: PAGE_URL }).connection.find((l) => l.startsWith("Another page"))!.endsWith("https://example.com/.")).toBe(true);
   });
 });
+
+describe("drafted descriptions from an agent summary that starts 'This is' (react.dev, 2026-10-11 22:31)", () => {
+  const summary =
+    "This is the official React Quick Start learning guide that introduces the core concepts used in daily React development, including creating components, JSX syntax, styling, rendering lists, responding to events, managing state with Hooks, and sharing data between components.";
+
+  it("drops the lead-in and does not end in a comma before the dots", () => {
+    const draft = suggestDescription("", null, summary, null);
+    expect(draft.startsWith("The official React Quick Start")).toBe(true);
+    expect(draft).not.toMatch(/[,;:]\.\.\.$/);
+    expect(draft.endsWith("...")).toBe(true);
+    expect(draft.length).toBeLessThanOrEqual(155);
+  });
+
+  it("keeps a summary that only mentions 'this is' later on", () => {
+    expect(withoutPageFraming("Search engine optimization is what this is about.")).toBe("Search engine optimization is what this is about.");
+  });
+});

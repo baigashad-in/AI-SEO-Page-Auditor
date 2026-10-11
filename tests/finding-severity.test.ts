@@ -134,13 +134,14 @@ describe("text that Fetch also misses because it only exists after JavaScript (m
     expect(all.find((x) => x.id === "extract-thin")).toBeUndefined();
   });
 
-  it("still blames extraction when Fetch got more than the raw HTML", () => {
+  it("blames extraction, not thin text, when Fetch got more than the raw HTML", () => {
     const md = `## The Medium Blog\n\n${"Writers share stories about craft and tools every week. ".repeat(20)}`;
     const b = bundle({ fetch: fetchStage(md), browser: br(), search: search(2), query: "medium blog" });
     expect(fetchMissedJsContent(b)).toBe(false);
     const all = buildFindings(b);
     expect(all.find((x) => x.id === "extract-content-lost")!.title).toContain("of the visible text");
-    expect(all.find((x) => x.id === "extract-thin")).toBeDefined();
+    // The page has the text, so "add more text" would be the wrong fix (v21).
+    expect(all.find((x) => x.id === "extract-thin")).toBeUndefined();
   });
 
   it("rates a raw title that JavaScript only lengthens as medium", () => {
@@ -242,5 +243,46 @@ describe("a training crawler blocked at the server or CDN", () => {
     const finding = edgeFinding("User-agent: *\nAllow: /");
     expect(finding.severity).toBe("low");
     expect(finding.evidence.join(" ")).toContain("robots.txt allows ClaudeBot");
+  });
+});
+
+describe("a page that shows its text, but Fetch gets little of it (medium.com/blog, 2026-10-11 22:34)", () => {
+  // Fetch glues each post title to its subtitle ("...Medium Day 2026TK, AI, and..."), and the DOM
+  // holds each post twice (two layouts, one hidden), so the visible text is half the DOM text.
+  const featured = [
+    ["Here’s what stood out at Medium Day 2026", "TK, AI, and an unending love for reading, writing, and sharing."],
+    ["Medium’s State of Writing Report 2026: A private writing revival", "Most writers are using AI in some way, but also most of their writing is happening in private."],
+  ];
+  const later = Array.from({ length: 12 }, (_, i) => [`Editor update ${i} for publication teams`, "More details about this product change for writers and editors. ".repeat(4).trim()]);
+  const cards = [...featured, ...later].map(([t, sub]) => `<h2>${t}</h2><h3>${sub}</h3>`).join("");
+  const raw = "<html><body><p>Sign in Get app The Medium Blog</p></body></html>";
+  const rendered = `<html><body><h2>The Medium Blog</h2>${cards}${cards}</body></html>`;
+  const md = featured.map(([t, sub]) => `${t}${sub}Zulie @ Medium·Sep 24·6 min read`).join("\n\n");
+  const comps = [500, 520, 480].map((w, i) => ({ url: `https://other${i}.com/`, position: i + 2, title: "t", fetched: true, terms: {}, stats: markdownStats("word ".repeat(w)) }));
+  const findings = (innerWords?: number) => {
+    const br = browserStage(raw, rendered);
+    br.renderedInnerTextWords = innerWords ?? Math.round(br.rendered!.words / 2);
+    return buildFindings(bundle({ fetch: fetchStage(md), browser: br, search: search(null, { competitors: comps }) }));
+  };
+
+  it("measures extraction against the words a browser shows and lists only sections Fetch lost", () => {
+    const lost = findings().find((x) => x.id === "extract-content-lost")!;
+    const shown = Math.round(browserStage(raw, rendered).rendered!.words / 2);
+    expect(lost.evidence[0]).toContain(`the rendered page shows ${shown} words`);
+    const dropped = lost.evidence.find((e) => e.startsWith("Sections dropped"))!;
+    expect(dropped).toContain('"The Medium Blog"');
+    expect(dropped).not.toContain("Medium Day 2026");
+    expect(dropped).not.toContain("private writing revival");
+    expect(dropped.match(/Editor update 0 /g)).toHaveLength(1);
+  });
+
+  it("does not ask for more text or more depth when the page already has it", () => {
+    const ids = findings().map((x) => x.id);
+    expect(ids).not.toContain("extract-thin");
+    expect(ids).not.toContain("gap-depth");
+  });
+
+  it("still asks for depth when the page shows fewer words than the pages that rank", () => {
+    expect(findings(320).map((x) => x.id)).toContain("gap-depth");
   });
 });

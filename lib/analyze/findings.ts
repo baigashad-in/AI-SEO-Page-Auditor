@@ -104,7 +104,8 @@ function fitToLength(text: string, max = 155): string {
     if (next.length > max) break;
     out = next;
   }
-  return out.length >= 60 ? out : t.slice(0, max - 3).replace(/\s+\S*$/, "") + "...";
+  // No comma or colon right before the "..." ("including creating components,...").
+  return out.length >= 60 ? out : t.slice(0, max - 3).replace(/\s+\S*$/, "").replace(/[,;:]+$/, "") + "...";
 }
 
 /**
@@ -134,7 +135,10 @@ export function snippetDraft(snippet: string | null | undefined): string | null 
  * should speak as the page, so the lead-in is dropped: "The official...".
  */
 export function withoutPageFraming(s: string): string {
-  const m = s.match(/^(?:this|the)\s+(?:[\w./:-]+\s+)?(?:web\s*)?page\s+(?:is|provides|offers|contains|gives|presents|serves as)\s+(.+)$/i);
+  // "This is the official React Quick Start guide..." (react.dev, 2026-10-11) as well as "This page is...".
+  const m =
+    s.match(/^(?:this|the)\s+(?:[\w./:-]+\s+)?(?:web\s*)?page\s+(?:is|provides|offers|contains|gives|presents|serves as)\s+(.+)$/i) ??
+    s.match(/^this\s+is\s+((?:the|an?)\s+.+)$/i);
   if (!m) return s;
   const rest = m[1];
   return rest.charAt(0).toUpperCase() + rest.slice(1);
@@ -584,6 +588,26 @@ export function fetchMissedJsContent(b: StageBundle): boolean {
   return words <= br.raw.words * 1.25 + 20;
 }
 
+/**
+ * Words a browser shows on the page: innerText when it was measured, so text in hidden duplicate
+ * layouts does not count (Medium's blog lists each post twice: 1829 words in the DOM, 794 shown).
+ * Null without a usable render.
+ */
+export function visibleWords(b: StageBundle): number | null {
+  const br = b.browser;
+  if (!br?.ok || !br.rendered || br.challenge || br.rawChallenge) return null;
+  return br.renderedInnerTextWords > 0 ? br.renderedInnerTextWords : br.rendered.words;
+}
+
+/**
+ * Fetch's markdown can glue a heading to the line after it ("Medium Day 2026TK, AI, and...",
+ * "a private writing revivalMost writers..."), so a lowercase letter or digit followed by a capital
+ * counts as a word break. Applied to both sides of a comparison, so "TinyFish" still matches itself.
+ */
+function unglue(s: string): string {
+  return s.replace(/([\p{Ll}\d])(\p{Lu})/gu, "$1 $2");
+}
+
 interface MissingLines {
   lines: string[];
   words: number;
@@ -773,25 +797,26 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
   // extractor (with <main> advice) would send the fix to the wrong place.
   const preJs = fetchMissedJsContent(b);
   const base = preJs ? b.browser!.raw! : ren;
-  if (base && base.words >= 300) {
-    const mdNorm = ` ${normForMatch(extractedText)} `;
-    const lostHeadings = base.headings
-      .filter((h) => h.level <= 3)
-      .map((h) => h.text)
-      .filter((t) => {
-        const n = normForMatch(t);
-        return n.split(" ").length >= 2 && !mdNorm.includes(` ${n} `);
-      });
-    const ratio = s.words / base.words;
+  // Against the rendered page, count the words a browser shows (see visibleWords).
+  const baseWords = preJs ? b.browser!.raw!.words : (visibleWords(b) ?? ren?.words ?? 0);
+  let extractionLost = false;
+  if (base && baseWords >= 300) {
+    const mdNorm = ` ${normForMatch(unglue(extractedText))} `;
+    const lostHeadings = [...new Set(base.headings.filter((h) => h.level <= 3).map((h) => h.text))].filter((t) => {
+      const n = normForMatch(unglue(t));
+      return n.split(" ").length >= 2 && !mdNorm.includes(` ${n} `);
+    });
+    const ratio = s.words / baseWords;
     if (ratio < 0.35 || lostHeadings.length >= 3) {
+      extractionLost = true;
       out.push({
         id: "extract-content-lost",
         category: "extraction",
         severity: ratio < 0.2 || lostHeadings.length >= 5 ? "high" : "medium",
         confidence: "medium",
-        title: `AI extraction keeps ${pct(s.words, base.words)} of the ${preJs ? "server HTML text" : "visible text"}`,
+        title: `AI extraction keeps ${pct(s.words, baseWords)} of the ${preJs ? "server HTML text" : "visible text"}`,
         evidence: [
-          `Fetch extracted ${s.words} words; the ${preJs ? "raw server HTML has" : "rendered page has"} ${base.words} words (navigation and footer included).`,
+          `Fetch extracted ${s.words} words; the ${preJs ? "raw server HTML has" : "rendered page shows"} ${baseWords} words (navigation and footer included).`,
           lostHeadings.length ? `Sections dropped by extraction: ${lostHeadings.slice(0, 6).map((h) => `"${h}"`).join(", ")}` : "",
           `Semantic containers: <main> ${base.hasMain ? "present" : "missing"}, <article> ${base.hasArticle ? "present" : "missing"}.`,
         ].filter(Boolean),
@@ -814,10 +839,11 @@ function extractionChecks(b: StageBundle, out: Finding[]) {
   const comps = b.search?.competitors.filter((c) => c.fetched && c.stats) || [];
   const compWords = comps.map((c) => c.stats!.words).sort((a, b2) => a - b2);
   const median = compWords.length ? compWords[Math.floor(compWords.length / 2)] : null;
-  // The page already has the text but serves it only through JavaScript: the rendering finding owns
-  // that (with the Fetch word count as evidence), and "add more text" would be the wrong fix.
+  // The page already has the text, but Fetch does not get it: through JavaScript (the rendering
+  // finding owns that, with the Fetch word count as evidence) or through extraction (the finding
+  // above). "Add more text" would be the wrong fix for either.
   const textExistsAfterJs = preJs && !!ren && ren.words >= 300;
-  if (s.words < 300 && !textExistsAfterJs) {
+  if (s.words < 300 && !textExistsAfterJs && !extractionLost) {
     // Pages that rank with even less text show that length is not what holds this page back.
     const notBehind = median !== null && s.words >= median;
     out.push({
@@ -1359,7 +1385,11 @@ function contentGapChecks(b: StageBundle, out: Finding[]) {
 
   const words = comps.map((c) => c.stats!.words).sort((a, b2) => a - b2);
   const median = words[Math.floor(words.length / 2)];
-  if (median >= 2 * Math.max(f.stats.words, 1) && median > 400) {
+  // A page that shows a browser as many words as the competitors give is not short of depth; Fetch
+  // gets less of it (Medium's blog: 794 words shown, 116 extracted), which the rendering and
+  // extraction findings cover, so "add depth" would be the wrong fix.
+  const shown = visibleWords(b);
+  if (median >= 2 * Math.max(f.stats.words, 1) && median > 400 && !(shown !== null && shown >= median)) {
     out.push({
       id: "gap-depth",
       category: "content_gap",
