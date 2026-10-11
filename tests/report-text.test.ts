@@ -380,3 +380,47 @@ describe("a crawler user-agent request that timed out (react.dev, 2026-10-11)", 
     expect(line).toContain("The OAI-SearchBot request timed out");
   });
 });
+
+describe("agent quotes that start with a tab label (tinyfish.ai, 2026-10-11 19:29)", () => {
+  const fetchText = "Access the web that search can't reach. Navigate, fill forms, authenticate, return structured results. Give it a goal in plain English.";
+
+  it("counts the quote as present when only the label is missing from the text", () => {
+    expect(quoteAppearsIn("TinyAgent: Multi-step web automation. Navigate, fill forms, authenticate, return structured results.", fetchText)).toBe(true);
+  });
+
+  it("never treats a missing part with a number as a label", () => {
+    expect(quoteAppearsIn("From $49 a month. Navigate, fill forms, authenticate, return structured results.", fetchText)).toBe(false);
+  });
+});
+
+describe("lists in summary lines and titles", () => {
+  const probe = (bot: string) => ({ bot, userAgent: bot, status: 403, words: 119, challenge: true, verdict: "blocked" as const });
+
+  it("joins the blocked crawler user-agents with 'and' and keeps the plural (Medium)", () => {
+    const br = browserStage(`<html><body><p>${LONG_TEXT}</p></body></html>`, undefined, { botProbes: ["OAI-SearchBot", "Claude-SearchBot", "PerplexityBot"].map(probe) });
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), browser: br }), { url: PAGE_URL });
+    expect(r.connection).toContain(
+      "Requests sent with the OAI-SearchBot, Claude-SearchBot and PerplexityBot user-agents got a block or challenge page from your server or CDN. If the real crawlers are blocked too, those engines cannot index the page at all, whatever robots.txt says.",
+    );
+  });
+
+  it("joins the search crawlers robots.txt excludes with 'and' (Reddit)", () => {
+    const robots = robotsVerdicts("User-agent: *\nDisallow: /", REDDIT_URL);
+    const f = redditFetch(LONG_TEXT, { robots: { ...redditFetch(LONG_TEXT).robots, verdicts: robots.verdicts } });
+    const b = bundle({ fetch: f, search: search(1, {}, REDDIT_URL, "seo subreddit") }, REDDIT_URL, "seo subreddit");
+    const r = buildReport(b, { url: REDDIT_URL, query: "seo subreddit" });
+    expect(r.connection.join(" ")).toContain("excludes the OpenAI, Anthropic, Perplexity and Apple search crawlers");
+    expect(r.findings.find((x) => x.id === "access-robots-search-blocked")!.title).toBe(
+      "robots.txt blocks Googlebot, Bingbot, OAI-SearchBot, Claude-SearchBot, PerplexityBot and Applebot from this URL",
+    );
+  });
+
+  it("does not end a line in '?….' when the other ranking URL was shortened (Substack)", () => {
+    const long = "https://goodbetterbest.substack.com/p/3-simple-steps-to-make-pricing-changes?publication_id=22060&post_id=149705595&isFreemail=true&r=e0pzy";
+    const s = search(null, { domain: { bestPosition: 5, urls: [{ position: 5, url: long }] } });
+    const line = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), search: s }), { url: PAGE_URL }).connection.find((l) => l.startsWith("Another page"))!;
+    expect(line.endsWith("pricing-changes?…")).toBe(true);
+    const short = search(null, { domain: { bestPosition: 1, urls: [{ position: 1, url: "https://example.com/" }] } });
+    expect(buildReport(bundle({ fetch: fetchStage(LONG_TEXT), search: short }), { url: PAGE_URL }).connection.find((l) => l.startsWith("Another page"))!.endsWith("https://example.com/.")).toBe(true);
+  });
+});

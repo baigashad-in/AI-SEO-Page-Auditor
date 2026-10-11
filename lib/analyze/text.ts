@@ -142,15 +142,25 @@ export function quoteMatcher(text: string): (quote: string) => boolean {
 function quoteInNormalized(quote: string, t: string): boolean {
   if (coveredIn(quote, t)) return true;
   // Agents stitch labels and taglines from elsewhere on the page onto the sentences they quote
-  // (tinyfish.ai: a product tab label, "Multi-step web automation.", and the footer tagline, "Web APIs
-  // built for agents."). Extractors drop those as navigation and boilerplate, so the quote counts as
-  // present when the sentences found carry two thirds of its words, including one full sentence.
+  // (tinyfish.ai: the tab label "TinyAgent: Multi-step web automation." and the footer tagline "Web
+  // APIs built for agents."). Extractors drop those as navigation and boilerplate. So a missing label
+  // (under five words as written) is left out, and the quote counts as present when the sentences
+  // found carry two thirds of the remaining words, including one full sentence. A missing part with a
+  // number in it (a price, a date, a spec) is answer content, never boilerplate.
   const parts = quote.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
   if (parts.length < 2) return false;
   const words = (s: string) => s.split(/\s+/).length;
+  const sum = (list: string[]) => list.reduce((n, s) => n + words(s), 0);
   const found = parts.filter((s) => coveredIn(s, t));
-  const total = parts.reduce((n, s) => n + words(s), 0);
-  return found.some((s) => words(s) >= 5) && found.reduce((n, s) => n + words(s), 0) / total >= 2 / 3;
+  const missing = parts.filter((s) => !found.includes(s));
+  if (!found.some((s) => words(s) >= 5) || missing.some((s) => /\d/.test(s))) return false;
+  const counted = sum(found) + sum(missing.filter((s) => words(s) >= 5));
+  return sum(found) / counted >= 2 / 3;
+}
+
+/** "A", "A and B", "A, B and C": a list for a sentence or title. */
+export function andList(items: string[]): string {
+  return items.length > 1 ? `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}` : (items[0] ?? "");
 }
 
 export function firstNWords(text: string, n: number): string {

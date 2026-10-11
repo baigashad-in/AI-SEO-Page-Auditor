@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { markdownStats } from "../lib/parse/markdown";
 import { browserRenderIncomplete, buildFindings, buildStrengths, fetchMissedJsContent, sortFindings, topicGaps } from "../lib/analyze/findings";
 import { buildReport } from "../lib/analyze/report";
+import { robotsVerdicts } from "../lib/parse/robots";
 import type { Finding } from "../lib/types";
 import { agent, browserStage, bundle, fetchStage, LONG_TEXT, PAGE_URL, search } from "./helpers";
 
@@ -218,5 +219,28 @@ describe("a browser render that missed text Fetch got (medium.com/blog, 2026-10-
     const capped = bundle({ fetch: fetchStage(fetchMd), browser: browserStage(long, long) });
     expect(capped.browser!.rendered!.text.length).toBeGreaterThanOrEqual(39_900);
     expect(browserRenderIncomplete(capped)).toBeNull();
+  });
+});
+
+describe("a training crawler blocked at the server or CDN", () => {
+  const probe = { bot: "ClaudeBot", userAgent: "ClaudeBot", status: 403, words: 119, challenge: true, verdict: "blocked" as const };
+  const br = () => browserStage(`<html><body><p>${LONG_TEXT}</p></body></html>`, undefined, { botProbes: [probe] });
+  const edgeFinding = (robotsTxt: string) => {
+    const f = fetchStage(LONG_TEXT);
+    f.robots = { ...f.robots, verdicts: robotsVerdicts(robotsTxt, PAGE_URL).verdicts };
+    return buildFindings(bundle({ fetch: f, browser: br() })).find((x) => x.id === "access-edge-blocks-training-bots")!;
+  };
+
+  it("is a note when robots.txt also disallows it (Medium)", () => {
+    const finding = edgeFinding("User-agent: ClaudeBot\nDisallow: /");
+    expect(finding.severity).toBe("info");
+    expect(finding.evidence).toContain("robots.txt also disallows ClaudeBot, so the server or CDN rule matches what the site asks for.");
+    expect(finding.evidence[finding.evidence.length - 1]).toMatch(/^Caveat:/);
+  });
+
+  it("stays low when robots.txt allows it (Wikipedia)", () => {
+    const finding = edgeFinding("User-agent: *\nAllow: /");
+    expect(finding.severity).toBe("low");
+    expect(finding.evidence.join(" ")).toContain("robots.txt allows ClaudeBot");
   });
 });

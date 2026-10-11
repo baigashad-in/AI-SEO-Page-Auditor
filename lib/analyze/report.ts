@@ -4,7 +4,7 @@
 import type { AuditReport, CallLog, Scores } from "../types";
 import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, locateQuote, missingStages, seriousBlockers, usableStages, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
-import { truncate } from "./text";
+import { andList, truncate } from "./text";
 import { bareHost, displayUrl } from "../url";
 import { AI_BOTS } from "../parse/robots";
 import { withBrowserRobots } from "./robotsSource";
@@ -165,7 +165,11 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
       lines.push(`AI readability: ${scores.readability}/100${partial ? " (partial score)" : ""}. Search visibility was not measured in this run.`);
   }
   const other = pos === null ? s?.domain.urls[0] : undefined;
-  if (other) lines.push(`Another page on the same site ranks #${other.position} for "${q}" instead: ${displayUrl(other.url)}.`);
+  if (other) {
+    // No period after a shortened URL, so the line does not end in "?…."
+    const shown = displayUrl(other.url);
+    lines.push(`Another page on the same site ranks #${other.position} for "${q}" instead: ${shown}${shown.endsWith("\u2026") ? "" : "."}`);
+  }
   if (input.browser?.challenge)
     lines.push(
       `A real browser received a bot challenge page${input.browser.challenge.title ? ` ("${input.browser.challenge.title}")` : ""} instead of the content, so AI browsing agents are likely to hit the same wall. Browser-based checks were skipped.`,
@@ -199,13 +203,15 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
   if (blockedSearch.length)
     lines.push(
       indexedAnyway
-        ? `robots.txt, as served to TinyFish, excludes ${blockedSearch.map((v) => v.bot.operator).join(", ")} search crawlers. The page still ranks, so the site may treat verified crawlers differently; if those engines get the same file, the page cannot appear in their answers.`
-        : `robots.txt excludes ${blockedSearch.map((v) => v.bot.operator).join(", ")} search crawlers, so this page cannot appear in those answer engines regardless of its Google ranking.`,
+        ? `robots.txt, as served to TinyFish, excludes the ${andList(blockedSearch.map((v) => v.bot.operator))} search crawlers. The page still ranks, so the site may treat verified crawlers differently; if those engines get the same file, the page cannot appear in their answers.`
+        : `robots.txt excludes the ${andList(blockedSearch.map((v) => v.bot.operator))} search crawlers, so this page cannot appear in those answer engines regardless of its Google ranking.`,
     );
   const edge = br?.botProbes.filter((p) => p.verdict === "blocked" && AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
   if (edge.length)
     lines.push(
-      `Requests sent with the ${edge.map((p) => p.bot).join(", ")} user-agent got a block or challenge page from your server or CDN. If the real crawler is blocked too, that engine cannot index the page at all, whatever robots.txt says.`,
+      edge.length > 1
+        ? `Requests sent with the ${andList(edge.map((p) => p.bot))} user-agents got a block or challenge page from your server or CDN. If the real crawlers are blocked too, those engines cannot index the page at all, whatever robots.txt says.`
+        : `Requests sent with the ${edge[0].bot} user-agent got a block or challenge page from your server or CDN. If the real crawler is blocked too, that engine cannot index the page at all, whatever robots.txt says.`,
     );
 
   const comps = s?.competitors.filter((c) => c.fetched && c.stats) ?? [];
@@ -222,7 +228,7 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     const where = `${a.answer_location.replace(/_/g, " ")}${passed.length && a.answer_found ? `, after getting past ${[...new Set(passed.map(blockerPhrase))].join(" and ")}` : ""}`;
     const loc = locateQuote(input);
     if (!a.answer_found && agentWasBlocked(a)) {
-      lines.push(`An AI browsing agent looking for "${q}" was blocked before it could read the page (${[...new Set(a.blockers.map(blockerPhrase))].join(", ")}).`);
+      lines.push(`An AI browsing agent looking for "${q}" was blocked before it could read the page (${andList([...new Set(a.blockers.map(blockerPhrase))])}).`);
     } else if (!a.answer_found) {
       lines.push(`An AI browsing agent looking for "${q}" on the live page could not find an answer${a.missing_information.length ? `; it reported missing: ${a.missing_information.slice(0, 3).join("; ")}` : ""}.`);
     } else if (answeredOnOtherPage(a) && !loc.verified) {

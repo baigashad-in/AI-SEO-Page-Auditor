@@ -13,7 +13,7 @@ import type {
   Source,
 } from "../types";
 import { markdownToPlain } from "../parse/markdown";
-import { containsTerm, contentTokens, normForMatch, phraseSet, queryCoverage, quoteAppearsIn, quoteMatcher, stem, truncate } from "./text";
+import { andList, containsTerm, contentTokens, normForMatch, phraseSet, queryCoverage, quoteAppearsIn, quoteMatcher, stem, truncate } from "./text";
 import { TEXT_CAP } from "../parse/html";
 import { bareHost, displayUrl, oneLineError, rootDomain, sameUrl } from "../url";
 import { fetchErrorHelp } from "./fetchErrors";
@@ -302,7 +302,7 @@ function accessChecks(b: StageBundle, out: Finding[]) {
         category: "access",
         severity: indexedAnyway ? "high" : classic || blockedSearch.length >= 2 ? "critical" : "high",
         confidence: indexedAnyway ? "low" : "high",
-        title: `robots.txt blocks ${blockedSearch.map((v) => v.bot.token).join(", ")} from this URL`,
+        title: `robots.txt blocks ${andList(blockedSearch.map((v) => v.bot.token))} from this URL`,
         evidence: [
           ...blockedSearch.map((v) => `${v.bot.token} (${v.bot.operator}): blocked by "${v.matchedRule}" in group "User-agent: ${v.matchedGroup}". ${v.bot.note}`),
           ...(indexedAnyway
@@ -326,7 +326,7 @@ function accessChecks(b: StageBundle, out: Finding[]) {
         severity: "medium",
         // Same file as the search-crawler finding, so the same doubt applies when the page ranks anyway.
         confidence: indexedAnyway ? "low" : "high",
-        title: `robots.txt blocks on-demand fetches by ${blockedUser.map((v) => v.bot.token).join(", ")}`,
+        title: `robots.txt blocks on-demand fetches by ${andList(blockedUser.map((v) => v.bot.token))}`,
         evidence: [
           ...blockedUser.map((v) => `${v.bot.token}: "${v.matchedRule}" (group ${v.matchedGroup})`),
           ...(indexedAnyway ? [`The page ranks or is indexed despite this file blocking Googlebot. ${sameFileCaveat}`] : []),
@@ -411,7 +411,7 @@ function accessChecks(b: StageBundle, out: Finding[]) {
     const robotsAllows = f?.robots.status === "unreadable" ? [] : (f?.robots.verdicts.filter((v) => v.allowed).map((v) => v.bot.token) ?? []);
     const evidenceFor = (list: typeof bad) => {
       const allowedBots = list.filter((p) => robotsAllows.includes(p.bot)).map((p) => p.bot);
-      const names = allowedBots.length > 1 ? `${allowedBots.slice(0, -1).join(", ")} and ${allowedBots[allowedBots.length - 1]}` : allowedBots[0];
+      const names = andList(allowedBots);
       return [
         `Normal browser request: HTTP ${br.status}, ${br.raw?.words ?? 0} words in raw HTML.`,
         ...list.map((p) => `${p.bot} user-agent: HTTP ${p.status ?? "error"}, ${p.words} words${p.challenge ? ", bot challenge page" : ""} (${p.verdict}).`),
@@ -441,13 +441,19 @@ function accessChecks(b: StageBundle, out: Finding[]) {
       });
     }
     if (badTraining.length) {
+      // When robots.txt already disallows these crawlers (Medium and ClaudeBot), the edge rule only
+      // enforces what the site asks for, so it is a note rather than something to check.
+      const robotsAlsoBlocks = f?.robots.status !== "unreadable" && badTraining.every((p) => f?.robots.verdicts.some((v) => v.bot.token === p.bot && !v.allowed));
+      const evidence = evidenceFor(badTraining);
+      // Before the closing caveat line.
+      if (robotsAlsoBlocks) evidence.splice(evidence.length - 1, 0, `robots.txt also disallows ${andList(badTraining.map((p) => p.bot))}, so the server or CDN rule matches what the site asks for.`);
       out.push({
         id: "access-edge-blocks-training-bots",
         category: "access",
-        severity: "low",
+        severity: robotsAlsoBlocks ? "info" : "low",
         confidence: "medium",
         title: `Server or CDN blocks the training crawler user-agent (${badTraining.map((p) => p.bot).join(", ")})`,
-        evidence: evidenceFor(badTraining),
+        evidence,
         visibilityImpact:
           "This crawler collects data for model training, not search. Blocking it does not remove the page from AI search answers; the search crawlers above decide that. Many sites block it on purpose.",
         fix: { summary: "No action needed if intentional", steps: ["Keep the rule if you do not want your content used for training.", "Make sure the same rule does not also catch the search crawlers."], effort: "minutes" },
@@ -1498,7 +1504,7 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
       category: "answerability",
       severity: "high",
       confidence: "medium",
-      title: `An AI browsing agent was blocked before it could read the page (${[...new Set(blockers.map(blockerPhrase))].join(", ")})`,
+      title: `An AI browsing agent was blocked before it could read the page (${andList([...new Set(blockers.map(blockerPhrase))])})`,
       evidence: blockers.map(blockerEvidence),
       visibilityImpact:
         "Browsing agents (ChatGPT agent, Claude in Chrome and similar) read pages on a user's behalf. If they are blocked, they answer from other sources and cite those instead.",
@@ -1653,7 +1659,7 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
         category: "answerability",
         severity: serious.length ? "high" : answeredAnyway ? "low" : "medium",
         confidence: "medium",
-        title: `The agent had to get past ${[...new Set(all.map(blockerPhrase))].join(", ")}`,
+        title: `The agent had to get past ${andList([...new Set(all.map(blockerPhrase))])}`,
         evidence: [
           ...all.map(blockerEvidence),
           !serious.length && answeredAnyway ? "The agent got past it and still answered." : "",
