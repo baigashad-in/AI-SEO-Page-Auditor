@@ -327,3 +327,56 @@ describe("drafted descriptions use plain punctuation (react.dev)", () => {
     expect(plainDashes("History 2012\u20132016 and later")).toBe("History 2012-2016 and later");
   });
 });
+
+describe("agent quotes that end with the site's footer tagline (tinyfish.ai, 2026-10-11)", () => {
+  const fetchText = "Navigate, fill forms, authenticate, return structured results. Give it a goal in plain English. It works the live site.";
+
+  it("counts the quote as present when its sentences carry most of its words", () => {
+    expect(quoteAppearsIn("Navigate, fill forms, authenticate, return structured results. Give it a goal in plain English. Web APIs built for agents.", fetchText)).toBe(true);
+  });
+
+  it("does not count a quote whose main sentences are missing", () => {
+    expect(quoteAppearsIn("Navigate, fill forms, authenticate, return structured results. Book a demo with our sales team today. Pricing starts at ten dollars a month.", fetchText)).toBe(false);
+  });
+});
+
+describe("an agent that answered only after getting past a CAPTCHA (medium.com/blog, 2026-10-11)", () => {
+  const passed = () =>
+    agent({
+      answer_found: true,
+      evidence_quote: "This page is the homepage for The Medium Blog, the official publication for product news.",
+      answer_location: "visible_on_load",
+      interactions_needed: ["reconfigured browser to bypass Cloudflare CAPTCHA"],
+      blockers: [{ type: "captcha", description: "Cloudflare security verification with 'Verify you are human' checkbox blocked initial access" }],
+    });
+
+  it("scores it as answered with effort and says why", () => {
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: passed(), query: "medium blog" }), { url: PAGE_URL, query: "medium blog" });
+    expect(r.scores.answerability).toBe("answered_with_effort");
+    expect(r.connection.join(" ")).toContain("after getting past a CAPTCHA");
+    expect(r.strengths.join(" ")).not.toContain("visible on load");
+  });
+
+  it("keeps the strength when only a banner was in the way", () => {
+    const banner = agent({ answer_found: true, answer_location: "visible_on_load", blockers: [{ type: "modal", description: "Promo banner at the top" }] });
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: banner }), { url: PAGE_URL });
+    expect(r.scores.answerability).toBe("answered");
+    expect(r.strengths.join(" ")).toContain("visible on load");
+  });
+});
+
+describe("a crawler user-agent request that timed out (react.dev, 2026-10-11)", () => {
+  it("names the bots that were checked and the one that was not", () => {
+    const probe = (bot: string, ok: boolean) =>
+      ok
+        ? { bot, userAgent: bot, status: 200, words: 900, challenge: false, verdict: "ok" as const }
+        : { bot, userAgent: bot, status: null, words: 0, challenge: false, verdict: "error" as const, error: "page.goto: Timeout 20000ms exceeded." };
+    const br = browserStage(`<html><body><p>${LONG_TEXT}</p></body></html>`, undefined, {
+      botProbes: [probe("OAI-SearchBot", false), probe("Claude-SearchBot", true), probe("PerplexityBot", true)],
+    });
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), browser: br }), { url: PAGE_URL });
+    const line = r.strengths.find((x) => x.startsWith("Requests with AI search crawler"))!;
+    expect(line).toContain("(Claude-SearchBot, PerplexityBot)");
+    expect(line).toContain("The OAI-SearchBot request timed out");
+  });
+});

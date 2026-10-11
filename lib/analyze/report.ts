@@ -2,7 +2,7 @@
 // connection, findings, and the "do today" list.
 
 import type { AuditReport, CallLog, Scores } from "../types";
-import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, locateQuote, missingStages, usableStages, type StageBundle } from "./findings";
+import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, locateQuote, missingStages, seriousBlockers, usableStages, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
 import { truncate } from "./text";
 import { bareHost, displayUrl } from "../url";
@@ -103,7 +103,7 @@ export function computeScores(input: StageBundle): Scores {
       ? "not_answered"
       : answeredOnOtherPage(a) && !locateQuote(input).verified
         ? "answered_elsewhere"
-        : a.answer_location === "visible_on_load" || a.answer_location === "after_scroll"
+        : (a.answer_location === "visible_on_load" || a.answer_location === "after_scroll") && !seriousBlockers(a).length
         ? "answered"
         : "answered_with_effort";
 
@@ -217,7 +217,9 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
 
   const a = input.agent?.answer;
   if (a) {
-    const where = a.answer_location.replace(/_/g, " ");
+    // "visible on load, after getting past a CAPTCHA": the agent answered, but only after a challenge.
+    const passed = seriousBlockers(a);
+    const where = `${a.answer_location.replace(/_/g, " ")}${passed.length && a.answer_found ? `, after getting past ${[...new Set(passed.map(blockerPhrase))].join(" and ")}` : ""}`;
     const loc = locateQuote(input);
     if (!a.answer_found && agentWasBlocked(a)) {
       lines.push(`An AI browsing agent looking for "${q}" was blocked before it could read the page (${[...new Set(a.blockers.map(blockerPhrase))].join(", ")}).`);

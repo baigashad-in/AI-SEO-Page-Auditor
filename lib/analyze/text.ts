@@ -141,13 +141,16 @@ export function quoteMatcher(text: string): (quote: string) => boolean {
 
 function quoteInNormalized(quote: string, t: string): boolean {
   if (coveredIn(quote, t)) return true;
-  // Agents stitch short labels onto the sentences they quote ("Multi-step web automation. Navigate,
-  // fill forms, ..." on tinyfish.ai, where the label is a product tab). Extractors drop such labels
-  // as navigation, so a quote whose full sentences are all present counts as present.
+  // Agents stitch labels and taglines from elsewhere on the page onto the sentences they quote
+  // (tinyfish.ai: a product tab label, "Multi-step web automation.", and the footer tagline, "Web APIs
+  // built for agents."). Extractors drop those as navigation and boilerplate, so the quote counts as
+  // present when the sentences found carry two thirds of its words, including one full sentence.
   const parts = quote.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
-  // A label is under five words as written ("Multi-step web automation." is three).
-  const sentences = parts.filter((s) => s.split(/\s+/).length >= 5);
-  return sentences.length > 0 && sentences.length < parts.length && sentences.every((s) => coveredIn(s, t));
+  if (parts.length < 2) return false;
+  const words = (s: string) => s.split(/\s+/).length;
+  const found = parts.filter((s) => coveredIn(s, t));
+  const total = parts.reduce((n, s) => n + words(s), 0);
+  return found.some((s) => words(s) >= 5) && found.reduce((n, s) => n + words(s), 0) / total >= 2 / 3;
 }
 
 export function firstNWords(text: string, n: number): string {

@@ -1428,6 +1428,17 @@ function blockerFix(x: { type: string; description: string }): string {
 // Blocker descriptions that mean the agent never reached the content at all.
 const ACCESS_BLOCK = /block|denied|forbidden|captcha|challenge|security|verify|human|robot|access/i;
 
+/**
+ * Blockers that stop or challenge a reader (CAPTCHA, login or pay wall, block page), as opposed to a
+ * banner or pop-up that only covers content. An agent that answers after one of these needed tools
+ * a real reader or assistant may not have (on Medium the agent reconfigured its browser).
+ */
+export function seriousBlockers(a: AgentAnswer): AgentAnswer["blockers"] {
+  return a.blockers.filter(
+    (x) => ["login_wall", "paywall", "captcha", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
+  );
+}
+
 export function agentWasBlocked(a: AgentAnswer): boolean {
   return a.blockers.some(
     (x) => ["captcha", "login_wall", "paywall", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
@@ -1631,9 +1642,7 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
 
   // Overlays and walls the agent got past (when it was not fully blocked; that case is reported above).
   if (!(blocked && !a.answer_found)) {
-    const serious = a.blockers.filter(
-      (x) => ["login_wall", "paywall", "captcha", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
-    );
+    const serious = seriousBlockers(a);
     const covering = a.blockers.filter((x) => !serious.includes(x));
     if (serious.length || covering.length) {
       const all = [...serious, ...covering];
@@ -1818,11 +1827,19 @@ export function buildStrengths(input: StageBundle): string[] {
   if (f && f.robots.status !== "unreadable" && f.robots.verdicts.filter((v) => v.bot.purpose === "ai_search").every((v) => v.allowed)) s.push("robots.txt allows every AI search crawler checked (OAI-SearchBot, Claude-SearchBot, PerplexityBot, Applebot).");
   if (br?.raw && br.rendered && br.rendered.words > 0 && br.raw.words / br.rendered.words >= 0.9 && !browserRenderIncomplete(b)) s.push(`Content is in the server HTML (${br.raw.words} of ${br.rendered.words} words), so non-JavaScript AI crawlers can read it.`);
   const searchProbes = br?.botProbes.filter((p) => AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
-  if (searchProbes.length && searchProbes.every((p) => p.verdict === "ok"))
-    s.push(`Requests with AI search crawler user-agents (${searchProbes.map((p) => p.bot).join(", ")}) got the same page as a normal browser.`);
+  const probesOk = searchProbes.filter((p) => p.verdict === "ok");
+  const probesFailed = searchProbes.filter((p) => p.verdict === "error");
+  if (probesOk.length && probesOk.length + probesFailed.length === searchProbes.length)
+    s.push(
+      `Requests with AI search crawler user-agents (${probesOk.map((p) => p.bot).join(", ")}) got the same page as a normal browser.${
+        probesFailed.length
+          ? ` The ${probesFailed.map((p) => p.bot).join(" and ")} request ${probesFailed.some((p) => /timeout/i.test(p.error ?? "")) ? "timed out" : "failed"}, so ${probesFailed.length > 1 ? "those were" : "that one was"} not checked.`
+          : ""
+      }`,
+    );
   if (f?.stats && f.stats.words >= 600 && f.stats.headings.length >= 3) s.push(`Extraction is substantial and structured: ${f.stats.words} words under ${f.stats.headings.length} headings.`);
   if (br?.rendered && br.rendered.jsonLd.blocks > 0 && br.rendered.jsonLd.parseErrors === 0) s.push(`Valid structured data: ${br.rendered.jsonLd.types.join(", ") || "JSON-LD present"}.`);
   if (b.search?.target.position && b.search.target.position <= 3) s.push(`Ranks #${b.search.target.position} for "${b.search.query}".`);
-  if (b.agent?.answer?.answer_found && b.agent.answer.answer_location === "visible_on_load" && !answeredOnOtherPage(b.agent.answer)) s.push("An AI agent answered the query from content visible on load.");
+  if (b.agent?.answer?.answer_found && b.agent.answer.answer_location === "visible_on_load" && !answeredOnOtherPage(b.agent.answer) && !seriousBlockers(b.agent.answer).length) s.push("An AI agent answered the query from content visible on load.");
   return s;
 }
