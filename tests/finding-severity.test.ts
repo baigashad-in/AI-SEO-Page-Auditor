@@ -286,3 +286,35 @@ describe("a page that shows its text, but Fetch gets little of it (medium.com/bl
     expect(findings(320).map((x) => x.id)).toContain("gap-depth");
   });
 });
+
+describe("a browser snapshot saved before the page finished loading (medium.com/blog, 2026-10-11 23:59)", () => {
+  // Fetch was blocked this run, so only the visible word count shows the snapshot came too early.
+  const raw = `<html><head><title>Medium</title></head><body><p>${"nav ".repeat(49)}</p></body></html>`;
+  const saved = `<html><head><title>The Medium Blog</title></head><body><p>${"nav ".repeat(50)}</p></body></html>`;
+  const b = () => {
+    const br = browserStage(raw, saved);
+    br.renderedInnerTextWords = 160;
+    return bundle({ fetch: null, browser: br });
+  };
+
+  it("reports the early snapshot and judges JavaScript from the visible words", () => {
+    const all = buildFindings(b());
+    expect(all.find((x) => x.id === "render-incomplete")!.title).toContain("50 of 160 visible words");
+    const js = all.find((x) => x.id === "render-js-dependent-content")!;
+    expect(js.title).toBe("69% of the page text only appears after JavaScript runs");
+    expect(js.evidence[0]).toContain("160 visible words (the saved snapshot had 50");
+  });
+
+  it("does not claim the content is in the server HTML, and scores JavaScript dependence", () => {
+    expect(buildStrengths(b()).join(" ")).not.toContain("Content is in the server HTML");
+    const r = buildReport(b(), { url: PAGE_URL });
+    expect(r.scores.readabilityParts.find((p) => p.label === "Works without JavaScript")!.score).toBeLessThan(12);
+    expect(r.connection.join(" ")).toContain("saved the page before it finished loading (50 words saved, 160 shown)");
+  });
+
+  it("leaves a normal page alone, where the visible text is shorter than the DOM text", () => {
+    const br = browserStage(`<html><body><p>${LONG_TEXT}</p></body></html>`);
+    br.renderedInnerTextWords = Math.round(br.rendered!.words * 0.8);
+    expect(buildFindings(bundle({ fetch: null, browser: br })).find((x) => x.id === "render-incomplete")).toBeUndefined();
+  });
+});

@@ -441,3 +441,62 @@ describe("drafted descriptions from an agent summary that starts 'This is' (reac
     expect(withoutPageFraming("Search engine optimization is what this is about.")).toBe("Search engine optimization is what this is about.");
   });
 });
+
+describe("blockers the agent says did not get in the way (Wikipedia, 2026-10-11 23:54)", () => {
+  const banner = {
+    type: "other",
+    description: "A promotional banner about Wiki Loves Monuments 2026 appeared at the top of the page but did not block the main content.",
+  };
+
+  it("does not report or score a banner that did not block", () => {
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: agent({ answer_found: true, answer_location: "visible_on_load", blockers: [banner] }) }), { url: PAGE_URL });
+    expect(r.findings.find((x) => x.id === "answer-blockers")).toBeUndefined();
+    expect(r.scores.answerability).toBe("answered");
+    expect(r.strengths.join(" ")).toContain("visible on load");
+  });
+
+  it("still treats Reddit's block pages as blocks, even when they say 'no content visible' or 'not accessible'", () => {
+    for (const description of [
+      "The page shows 'You've been blocked by network security' with no subreddit content visible.",
+      "The Reddit page is blocked by network security. The actual SEO subreddit content is not accessible.",
+      "Network security block prevented the page from loading the subreddit content",
+    ]) {
+      const a = agent({ answer_found: false, answer_summary: null, answer_location: "not_on_page", blockers: [{ type: "other", description }] });
+      const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: a }), { url: PAGE_URL });
+      expect(r.findings.find((x) => x.id === "answer-blocked"), description).toBeDefined();
+    }
+  });
+
+  it("does not read 'accessible' or 'human' in a banner as a block", () => {
+    const a = agent({ answer_found: true, answer_location: "visible_on_load", blockers: [{ type: "other", description: "An announcement about human rights day sat above the accessible main text." }] });
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: a }), { url: PAGE_URL });
+    expect(r.scores.answerability).toBe("answered");
+    expect(r.findings.find((x) => x.id === "answer-blockers")!.title).toBe("The agent had to get past a banner");
+  });
+
+  it("does not count a step that says the agent stayed on the page as leaving it", () => {
+    expect(answeredOnOtherPage(agent({ interactions_needed: ["Read the intro; did not navigate to another page"] }).answer!)).toBe(false);
+    expect(answeredOnOtherPage(agent({ interactions_needed: ["Navigated to the pricing page"] }).answer!)).toBe(true);
+  });
+});
+
+describe("summary lines that must match the findings (2026-10-12 run)", () => {
+  it("hedges a short quote the same way the finding does (tinyfish.ai)", () => {
+    const html = `<html><body><p>${LONG_TEXT}</p><footer><p>Web APIs built for agents.</p></footer></body></html>`;
+    const a = agent({ evidence_quote: "Web APIs built for agents.", answer_location: "visible_on_load" });
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), browser: browserStage(html), agent: a, query: "web agent api" }), { url: PAGE_URL, query: "web agent api" });
+    const line = r.connection.find((l) => l.startsWith("An AI browsing agent answered"))!;
+    expect(line).toContain("short quote");
+    expect(line).not.toContain("never receive that answer");
+    expect(r.findings.find((x) => x.id === "answer-hidden")!.confidence).toBe("low");
+  });
+
+  it("names what JavaScript adds when the server HTML has 70 to 90% of the text (Wikipedia's fundraising banner)", () => {
+    const raw = `<html><body><p>${"word ".repeat(770)}</p></body></html>`;
+    const ren = `<html><body><h2>Donor-Advised Fund (DAF)</h2><p>${"gift ".repeat(230)}</p><p>${"word ".repeat(770)}</p></body></html>`;
+    const br = browserStage(raw, ren, { onlyAfterJs: { headings: ["Donor-Advised Fund (DAF)"], title: false, description: false, canonical: false, h1: false, jsonLd: false } });
+    const line = buildReport(bundle({ fetch: fetchStage("word ".repeat(770)), browser: br }), { url: PAGE_URL }).connection.find((l) => l.includes("server HTML"))!;
+    expect(line).toContain('JavaScript adds the rest, including "Donor-Advised Fund (DAF)"');
+    expect(line).not.toContain("essentially the same page");
+  });
+});

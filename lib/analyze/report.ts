@@ -2,7 +2,7 @@
 // connection, findings, and the "do today" list.
 
 import type { AuditReport, CallLog, Scores } from "../types";
-import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, locateQuote, missingStages, seriousBlockers, usableStages, type StageBundle } from "./findings";
+import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, isShortQuote, locateQuote, missingStages, obstacles, seriousBlockers, snapshotIncomplete, usableStages, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
 import { andList, truncate } from "./text";
 import { bareHost, displayUrl } from "../url";
@@ -41,7 +41,8 @@ export function computeScores(input: StageBundle): Scores {
   if (br?.raw && br.rendered) {
     // When the browser's render missed text Fetch got, the page holds at least raw + that text.
     const gap = browserRenderIncomplete(b);
-    const fullWords = gap ? Math.max(br.rendered.words, br.raw.words + gap.notInRaw.words) : br.rendered.words;
+    const snap = gap ? null : snapshotIncomplete(b);
+    const fullWords = gap ? Math.max(br.rendered.words, br.raw.words + gap.notInRaw.words) : snap ? snap.shownWords : br.rendered.words;
     const ratio = fullWords > 0 ? br.raw.words / fullWords : 1;
     let r = 25 * clamp(ratio / 0.9);
     const js = br.onlyAfterJs;
@@ -178,12 +179,17 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
   const rc = input.browser?.rawChallenge;
 
   const gap = browserRenderIncomplete(b);
+  const snap = gap ? null : snapshotIncomplete(b);
   if (gap && gap.notInRaw.words >= 40 && rawW !== null && !rc) {
     lines.push(
       `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words. TinyFish Fetch extracted ${gap.fetchWords}, with ${gap.notInRaw.words} words in lines that HTML does not contain, so much of the page text arrives through JavaScript. The remote browser's render was incomplete this run (${renW} words), so Fetch's text is the better guide.`,
     );
   } else if (gap) {
     lines.push(`The remote browser's render was incomplete this run: it showed ${renW} words, while Fetch extracted ${gap.fetchWords}. Browser-based checks may understate the page.`);
+  } else if (snap && rawW !== null && !rc) {
+    lines.push(
+      `The remote browser saved the page before it finished loading (${snap.savedWords} words saved, ${snap.shownWords} shown), so browser-based checks may understate the page. Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words.`,
+    );
   } else if (rc && !input.browser?.challenge) {
     lines.push(
       `The first HTML response is a bot challenge (${rc.reason}); a browser gets through after JavaScript runs${renW !== null ? ` and sees ${renW} words` : ""}. Crawlers that skip JavaScript (GPTBot, ClaudeBot, PerplexityBot) stop at the challenge, so those engines have nothing to index.`,
@@ -194,7 +200,15 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
       lines.push(
         `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words; a browser shows ${renW}. ${pos ? `The page still ranks #${pos} in TinyFish Search, but ChatGPT, Claude and Perplexity crawlers work from the ${rawW}-word version.` : "Those engines index the smaller version, which makes ranking and citation less likely."}`,
       );
-    else lines.push(`The server HTML already carries ${Math.round(ratio * 100)}% of the visible text, so crawlers that skip JavaScript see essentially the same page as users.`);
+    else if (ratio >= 0.9) lines.push(`The server HTML already carries ${Math.round(ratio * 100)}% of the visible text, so crawlers that skip JavaScript see essentially the same page as users.`);
+    else {
+      // 70 to 90%: name what JavaScript adds, so the reader can tell a banner from content (Wikipedia's
+      // fundraising banner, 2026-10-11, added "Donor-Advised Fund (DAF)" and similar headings).
+      const late = [...new Set(input.browser?.onlyAfterJs.headings ?? [])].slice(0, 2).map((h) => `"${truncate(h, 60)}"`);
+      lines.push(
+        `The server HTML carries ${Math.round(ratio * 100)}% of the rendered text; JavaScript adds the rest${late.length ? `, including ${andList(late)}` : ""}. If that is content you want AI tools to quote, put it in the server HTML.`,
+      );
+    }
   }
 
   const blockedSearch = f?.robots.verdicts.filter((v) => !v.allowed && v.bot.purpose === "ai_search") ?? [];
@@ -228,7 +242,7 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     const where = `${a.answer_location.replace(/_/g, " ")}${passed.length && a.answer_found ? `, after getting past ${[...new Set(passed.map(blockerPhrase))].join(" and ")}` : ""}`;
     const loc = locateQuote(input);
     if (!a.answer_found && agentWasBlocked(a)) {
-      lines.push(`An AI browsing agent looking for "${q}" was blocked before it could read the page (${andList([...new Set(a.blockers.map(blockerPhrase))])}).`);
+      lines.push(`An AI browsing agent looking for "${q}" was blocked before it could read the page (${andList([...new Set(obstacles(a).map(blockerPhrase))])}).`);
     } else if (!a.answer_found) {
       lines.push(`An AI browsing agent looking for "${q}" on the live page could not find an answer${a.missing_information.length ? `; it reported missing: ${a.missing_information.slice(0, 3).join("; ")}` : ""}.`);
     } else if (answeredOnOtherPage(a) && !loc.verified) {
@@ -243,7 +257,10 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
       const seenBy = [loc.inFetch ? "fetch tools" : null, loc.inRaw ? "non-JavaScript crawlers" : null].filter(Boolean);
       const missedBy = [loc.inFetch === false ? "fetch tools" : null, loc.inRaw === false ? "non-JavaScript crawlers" : null].filter(Boolean);
       lines.push(
-        missedBy.length
+        missedBy.length && isShortQuote(a.evidence_quote)
+          ? // Same doubt as the finding: a few words may be a tagline, not the answer.
+            `An AI browsing agent answered "${q}" (${where}) with a short quote ("${truncate(a.evidence_quote, 80)}") that ${missedBy.join(" and ")} do not receive${seenBy.length ? ` (${seenBy.join(" and ")} do)` : ""}. It may be a tagline rather than the answer, so treat this as a weak signal.`
+          : missedBy.length
           ? `An AI browsing agent answered "${q}" (${where}), but ${missedBy.join(" and ")} never receive that answer${seenBy.length ? `; ${seenBy.join(" and ")} do` : ""}. Answer engines can only quote what they receive.`
           : `An AI browsing agent answered "${q}" (${where}), and the same answer is in what ${seenBy.join(" and ") || "crawlers"} receive.`,
       );
@@ -283,7 +300,9 @@ export function buildReport(stages: StageBundle, input: { url: string; query?: s
           ? "The first HTML response was a bot challenge page, so there is no raw server HTML word count for the real page."
           : browserRenderIncomplete(b)
             ? `The remote browser's render was incomplete this run: it showed fewer words than Fetch extracted, so the rendered count understates the page.`
-            : null,
+            : snapshotIncomplete(b)
+              ? `The remote browser saved the page before it finished loading: the rendered count is from the saved HTML, while the page showed ${b.browser!.renderedInnerTextWords} words.`
+              : null,
       rawWords: b.browser?.challenge || b.browser?.rawChallenge ? null : (b.browser?.raw?.words ?? null),
       renderedWords: b.browser?.challenge ? null : (b.browser?.rendered?.words ?? null),
       extractedWords: b.fetch?.stats?.words ?? null,

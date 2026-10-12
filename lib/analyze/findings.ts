@@ -645,6 +645,19 @@ export function browserRenderIncomplete(b: StageBundle): ReturnType<typeof rende
   return g && g.notInRendered.words >= 40 && g.notInRendered.words >= 0.3 * g.fetchWords ? g : null;
 }
 
+/**
+ * The browser saved the page before it finished loading: the visible text, read right after the
+ * snapshot, is much longer than the snapshot (Medium, 2026-10-11 23:59: 50 words saved, 160 shown).
+ * Normally it is the other way round, because the DOM also holds hidden text.
+ */
+export function snapshotIncomplete(b: StageBundle): { savedWords: number; shownWords: number } | null {
+  const br = b.browser;
+  if (!br?.ok || !br.rendered || br.challenge || br.rawChallenge) return null;
+  const saved = br.rendered.words;
+  const shown = br.renderedInnerTextWords;
+  return shown >= saved * 1.5 && shown - saved >= 40 ? { savedWords: saved, shownWords: shown } : null;
+}
+
 const quoteLines = (lines: string[]) => lines.slice(0, 3).map((l) => `"${truncate(l, 80)}"`).join(", ");
 
 function renderingChecks(b: StageBundle, out: Finding[]) {
@@ -655,11 +668,14 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
   if (br.rawChallenge) return;
   const raw = br.raw;
   const ren = br.rendered;
-  const ratio = ren.words > 0 ? raw.words / ren.words : 1;
+  const gap = browserRenderIncomplete(b);
+  const snap = gap ? null : snapshotIncomplete(b);
+  // With a snapshot taken too early, the visible word count is the better measure of the page.
+  const renWords = snap ? snap.shownWords : ren.words;
+  const ratio = renWords > 0 ? raw.words / renWords : 1;
   const coverage = b.query ? queryCoverage(b.query, ren.text, "", []) : null;
   const rawCoverage = b.query ? queryCoverage(b.query, raw.text, "", []) : null;
   const termsOnlyAfterJs = coverage && rawCoverage ? coverage.inText.filter((t) => !rawCoverage.inText.includes(t)) : [];
-  const gap = browserRenderIncomplete(b);
   // Fetch saw more of the page than the browser: judge JavaScript dependence from Fetch's text instead.
   const jsFromFetch = !!gap && gap.notInRaw.words >= 40 && gap.notInRaw.words > ren.words - raw.words;
 
@@ -688,6 +704,31 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
     });
   }
 
+  if (snap) {
+    out.push({
+      id: "render-incomplete",
+      category: "rendering",
+      severity: "low",
+      confidence: "medium",
+      title: `The remote browser saved the page before it finished loading (${snap.savedWords} of ${snap.shownWords} visible words)`,
+      evidence: [
+        `The saved HTML has ${snap.savedWords} words; the page's visible text, read right after, had ${snap.shownWords}.`,
+        "Checks built on the saved HTML (headings, tags) may understate the page, so the JavaScript check uses the visible word count.",
+      ],
+      visibilityImpact:
+        "Text that loads late is missed by AI browsing agents and crawlers that read the page as it first appears.",
+      fix: {
+        summary: "Re-run, and serve the main text in the first HTML response",
+        steps: [
+          "Re-run the audit: load times differ between runs.",
+          "If it keeps happening, render the main content on the server instead of loading it after the page opens.",
+        ],
+        effort: "hours",
+      },
+      sources: ["browser"],
+    });
+  }
+
   if (jsFromFetch) {
     const jsOnlyWords = gap!.notInRaw.words;
     const total = raw.words + jsOnlyWords;
@@ -709,10 +750,10 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
       fix: { summary: "Put the main content in the server HTML", steps: [ssrAdvice(raw.frameworkHints), "Verify with: curl -s URL | grep \"a sentence from your page\"", "Re-run this audit; raw and rendered word counts should be close."], effort: "days" },
       sources: ["browser", "fetch"],
     });
-  } else if (ren.words >= 80 && ratio < 0.7) {
+  } else if (renWords >= 80 && ratio < 0.7) {
     // Severity follows how much text is missing, not only the ratio: 61 missing words on a 107-word
     // profile page matter less than 1,700 missing words on a blog index.
-    const jsOnlyWords = ren.words - raw.words;
+    const jsOnlyWords = renWords - raw.words;
     const nothingWithoutJs = raw.emptyAppShell || raw.words < 30;
     const severity: Severity =
       nothingWithoutJs || (ratio < 0.3 && jsOnlyWords >= 150) ? "critical" : jsOnlyWords >= 150 ? "high" : "medium";
@@ -722,9 +763,11 @@ function renderingChecks(b: StageBundle, out: Finding[]) {
       category: "rendering",
       severity,
       confidence: "high",
-      title: `${pct(ren.words - raw.words, ren.words)} of the page text only appears after JavaScript runs`,
+      title: `${pct(renWords - raw.words, renWords)} of the page text only appears after JavaScript runs`,
       evidence: [
-        `Raw server HTML: ${raw.words} words. Rendered DOM: ${ren.words} words.`,
+        snap
+          ? `Raw server HTML: ${raw.words} words. Rendered page: ${renWords} visible words (the saved snapshot had ${ren.words}; see the incomplete-render finding).`
+          : `Raw server HTML: ${raw.words} words. Rendered DOM: ${ren.words} words.`,
         severity === "medium" ? `JavaScript adds ${jsOnlyWords} words, which is a small amount in absolute terms.` : "",
         raw.emptyAppShell ? "The raw HTML is an empty app shell (a root div with almost no text)." : "",
         fetchMissed ? `TinyFish Fetch extracted ${b.fetch!.stats!.words} words, no more than the raw HTML holds, so fetch-based AI tools miss this text too.` : "",
@@ -1444,7 +1487,8 @@ export function blockerType(x: { type: string; description: string }): string {
 
 export function blockerPhrase(x: { type: string; description: string }): string {
   const t = blockerType(x);
-  if (t === "block_page" || (t === "other" && /block|denied|forbidden|security|challenge/i.test(x.description))) return "a block page";
+  if (t === "block_page" || (t === "other" && ACCESS_BLOCK.test(x.description))) return "a block page";
+  if (t === "other" && BANNER_TEXT.test(x.description)) return "a banner";
   return BLOCKER_PHRASE[t] || "an obstacle";
 }
 
@@ -1461,8 +1505,29 @@ function blockerFix(x: { type: string; description: string }): string {
   return BLOCKER_FIX[blockerType(x)] || BLOCKER_FIX.other;
 }
 
-// Blocker descriptions that mean the agent never reached the content at all.
-const ACCESS_BLOCK = /block|denied|forbidden|captcha|challenge|security|verify|human|robot|access/i;
+// Blocker descriptions that mean the agent never reached the content at all. Whole words only:
+// "accessible", "human-readable" or "security" on its own say nothing about a block.
+const ACCESS_BLOCK =
+  /\bblock(?:ed|s|ing)?\b|\bdenied\b|\bforbidden\b|captcha|\bchallenge\b|security (?:check|verification|screen)|\bverify\b|prove (?:you|your)|\bnot a (?:bot|robot)\b|\b403\b/i;
+const BANNER_TEXT = /\b(?:banner|notice|announcement|promo(?:tional)?|newsletter|pop-?up|overlay|toast)\b/i;
+
+// Agents also list things that did not get in the way: "A promotional banner about Wiki Loves
+// Monuments 2026 appeared at the top of the page but did not block the main content" (Wikipedia,
+// 2026-10-11). "No subreddit content visible" or "is not accessible" (Reddit) are still blocks.
+const DID_NOT_BLOCK =
+  /\b(?:did ?n[o'\u2019]t|does ?n[o'\u2019]t|do ?n[o'\u2019]t|was ?n[o'\u2019]t|is ?n[o'\u2019]t|without|never|not)\s+(?:\w+\s+){0,2}?(?:block|obstruct|prevent|stop|hide|cover|interfere)\w*|\b(?:still|remained|fully)\s+(?:accessible|readable|visible|available)\b/i;
+
+/**
+ * The blockers that got in the agent's way. A banner, pop-up or "other" item whose own description
+ * says it did not block is dropped; walls and CAPTCHAs always count.
+ */
+export function obstacles(a: AgentAnswer): AgentAnswer["blockers"] {
+  return a.blockers.filter((x) => !["other", "modal", "cookie_wall"].includes(x.type) || !DID_NOT_BLOCK.test(x.description));
+}
+
+function isSerious(x: { type: string; description: string }): boolean {
+  return ["login_wall", "paywall", "captcha", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description));
+}
 
 /**
  * Blockers that stop or challenge a reader (CAPTCHA, login or pay wall, block page), as opposed to a
@@ -1470,23 +1535,27 @@ const ACCESS_BLOCK = /block|denied|forbidden|captcha|challenge|security|verify|h
  * a real reader or assistant may not have (on Medium the agent reconfigured its browser).
  */
 export function seriousBlockers(a: AgentAnswer): AgentAnswer["blockers"] {
-  return a.blockers.filter(
-    (x) => ["login_wall", "paywall", "captcha", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
-  );
+  return obstacles(a).filter(isSerious);
 }
 
 export function agentWasBlocked(a: AgentAnswer): boolean {
-  return a.blockers.some(
-    (x) => ["captcha", "login_wall", "paywall", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description)),
-  );
+  return seriousBlockers(a).length > 0;
 }
 
 // Steps that mean the agent left the audited page (rule 1 of its goal says not to, but agents can).
 const LEFT_PAGE = /navigat(?:e|ed|ing) to|went to (?:the|a|another)|opened (?:the|a|another) [\w' -]*page|go(?:ne)? to the [\w' -]*page|another page|different page|followed (?:the|a) link/i;
 
+const NOT_DONE = /\b(?:did ?n[o'\u2019]t|does ?n[o'\u2019]t|without|never|no need to|not)\b/i;
+
+/** A quote this short may be a tagline or heading rather than the answer (tinyfish.ai: "Web APIs built for agents."). */
+export function isShortQuote(quote: string): boolean {
+  return quote.split(/\s+/).filter(Boolean).length < 8;
+}
+
 /** True when the agent's answer came from another page than the one audited. */
 export function answeredOnOtherPage(a: AgentAnswer): boolean {
-  return a.answer_location === "other_page" || LEFT_PAGE.test(a.interactions_needed.join(" "));
+  // Step by step, and not a step that says it stayed ("did not navigate to another page").
+  return a.answer_location === "other_page" || a.interactions_needed.some((s) => LEFT_PAGE.test(s) && !NOT_DONE.test(s));
 }
 
 /** Where the agent's quote can be found. "unverified" means it is not on the page as written (a paraphrase). */
@@ -1528,7 +1597,7 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
 
   if (!a.answer_found && blocked) {
     // The agent never saw the content: "add this information" advice would be wrong.
-    const blockers = a.blockers.filter((x) => x.type !== "cookie_wall" && x.type !== "modal");
+    const blockers = obstacles(a).filter((x) => x.type !== "cookie_wall" && x.type !== "modal");
     out.push({
       id: "answer-blocked",
       category: "answerability",
@@ -1634,7 +1703,7 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
       // A few words (a tagline, a heading) are weak evidence of where "the answer" lives, and
       // extractors often drop taglines on purpose.
       const quoteWords = a.evidence_quote.split(/\s+/).filter(Boolean).length;
-      const shortQuote = quoteWords < 8;
+      const shortQuote = isShortQuote(a.evidence_quote);
       if (shortQuote && (severity === "high" || severity === "medium")) severity = severity === "high" ? "medium" : "low";
       out.push({
         id: "answer-hidden",
@@ -1679,7 +1748,7 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
   // Overlays and walls the agent got past (when it was not fully blocked; that case is reported above).
   if (!(blocked && !a.answer_found)) {
     const serious = seriousBlockers(a);
-    const covering = a.blockers.filter((x) => !serious.includes(x));
+    const covering = obstacles(a).filter((x) => !serious.includes(x));
     if (serious.length || covering.length) {
       const all = [...serious, ...covering];
       // A banner or pop-up the agent dismissed and then answered anyway is friction, not a blocker.
@@ -1861,7 +1930,7 @@ export function buildStrengths(input: StageBundle): string[] {
   const br = b.browser;
   const f = b.fetch;
   if (f && f.robots.status !== "unreadable" && f.robots.verdicts.filter((v) => v.bot.purpose === "ai_search").every((v) => v.allowed)) s.push("robots.txt allows every AI search crawler checked (OAI-SearchBot, Claude-SearchBot, PerplexityBot, Applebot).");
-  if (br?.raw && br.rendered && br.rendered.words > 0 && br.raw.words / br.rendered.words >= 0.9 && !browserRenderIncomplete(b)) s.push(`Content is in the server HTML (${br.raw.words} of ${br.rendered.words} words), so non-JavaScript AI crawlers can read it.`);
+  if (br?.raw && br.rendered && br.rendered.words > 0 && br.raw.words / br.rendered.words >= 0.9 && !browserRenderIncomplete(b) && !snapshotIncomplete(b)) s.push(`Content is in the server HTML (${br.raw.words} of ${br.rendered.words} words), so non-JavaScript AI crawlers can read it.`);
   const searchProbes = br?.botProbes.filter((p) => AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
   const probesOk = searchProbes.filter((p) => p.verdict === "ok");
   const probesFailed = searchProbes.filter((p) => p.verdict === "error");
