@@ -1,6 +1,6 @@
 {
   "name": "ai-page-auditor",
-  "version": "22.0.0",
+  "version": "23.0.0",
   "private": true,
   "description": "Audits whether AI search and fetch tools can read a page, and how that ties to search visibility. Built on TinyFish Search, Fetch, Browser and Agent.",
   "scripts": {
@@ -9,6 +9,7 @@
     "start": "next start",
     "audit": "tsx scripts/audit-cli.ts",
     "demo": "tsx scripts/demo.ts",
+    "check": "tsx scripts/check.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

@@ -9,6 +9,7 @@ import { loadEnv } from "./env";
 import { runFullAudit } from "../lib/orchestrate";
 import { stampForFile } from "../lib/url";
 import { scoreNotes } from "../lib/analyze/scoreNotes";
+import { checkReport } from "../lib/analyze/consistency";
 import { saveReport } from "./save";
 
 loadEnv();
@@ -20,6 +21,7 @@ async function main() {
   mkdirSync(out, { recursive: true });
   const rows: string[] = [];
   const partial: string[] = []; // why a page's report is missing stage data, one entry per page
+  const ruleProblems: string[] = []; // broken report rules (lib/analyze/consistency.ts), one line each
   for (const [i, p] of pages.entries()) {
     // Spread runs out to stay inside per-minute Search and Fetch limits on free tiers.
     if (i > 0) await new Promise((r) => setTimeout(r, 20_000));
@@ -32,6 +34,7 @@ async function main() {
       );
       const saved = saveReport(out, r);
       console.log(`  Saved ${basename(saved.md)} and ${basename(saved.json)}`);
+      for (const v of checkReport(r)) ruleProblems.push(`${p.url}: ${v.rule}: ${v.message}`);
       const top = r.findings.find((f) => f.severity !== "info");
       const notes = scoreNotes(r.scores);
       const why = r.findings.find((f) => f.id === "audit-coverage")?.evidence.join(" ");
@@ -64,6 +67,13 @@ async function main() {
   ].join("\n");
   writeFileSync(join(out, "index.md"), index);
   console.log(`\nWrote ${join(out, "index.md")}. Every .md and .json from this run is in ${out}.`);
+  // The same rules as `npm run check`, so a contradiction in a report shows up before it is shared.
+  if (ruleProblems.length) {
+    console.log(`\nReport rules: ${ruleProblems.length} broken. Run \`npm run check\` for details.`);
+    for (const line of ruleProblems) console.log(`  ${line}`);
+  } else {
+    console.log("\nReport rules: none broken.");
+  }
 }
 
 main().catch((err) => {

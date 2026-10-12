@@ -86,9 +86,15 @@ npm run audit -- https://example.com/pricing --query "pricing for small teams"
 npm run demo
 # audits every page in demo-pages.json and saves demo-reports/<run time>/:
 # one .md and one .json per page, plus index.md comparing them
+
+npm run check
+# checks the newest demo run against rules every report must satisfy (no API calls, no key needed)
+# --all checks every run; --rebuild analyzes the saved stage data again with the current code
 ```
 
-Both commands print each stage as it starts and finishes, plus a "still running" line every 15 seconds; a page usually takes 1 to 3 minutes, mostly the Agent. The web app prints the same `[audit]` lines in the terminal where `npm run dev` runs, while the page shows progress for each stage.
+`npm run check` catches contradictions a single check cannot see in itself: a "Content is in the server HTML" strength next to a JavaScript finding, a summary line that states as fact what its finding marks low confidence, a section listed as dropped that Fetch's text contains, broken punctuation in a draft. Each rule comes from a false claim found in a live run; `npm run check -- --rules` lists them. It exits with code 1 when a rule is broken.
+
+`audit` and `demo` print each stage as it starts and finishes, plus a "still running" line every 15 seconds; a page usually takes 1 to 3 minutes, mostly the Agent. The web app prints the same `[audit]` lines in the terminal where `npm run dev` runs, while the page shows progress for each stage.
 
 Run times in file names are UTC (for example `2026-10-09-103012`) and match `generatedAt` in the JSON. The web app's download buttons use the same names.
 
@@ -177,8 +183,9 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 183 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
+npm test           # 192 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
 npm run typecheck
+npm run check      # report rules on your saved demo runs (see How to run)
 ```
 
 `test-harness/` holds a local test site with known problems and a mock of the four TinyFish APIs that follows the documented request and response shapes, backed by a real local Chromium. It exists only to test the pipeline and UI offline. Real audits always call the real TinyFish APIs on the live page.
@@ -191,9 +198,9 @@ components/Report.tsx   Report view
 lib/tinyfish.ts         REST client for Search, Fetch, Browser, Agent
 lib/stages/             fetchStage, browserStage, searchStage, agentStage
 lib/parse/              robots.txt, HTML facts, markdown stats
-lib/analyze/            findings, scores, readability-to-visibility connection, Markdown export
+lib/analyze/            findings, scores, readability-to-visibility connection, Markdown export, report rules
 lib/client/             browser-side orchestration of the stages
-scripts/                CLI and batch demo
+scripts/                CLI, batch demo and report check
 tests/                  unit tests
 test-harness/           local mock and test site (testing only)
 ```
