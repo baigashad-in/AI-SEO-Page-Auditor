@@ -45,6 +45,21 @@ export const RULES: Rule[] = [
       ["answer-blockers", "answer-blocked"].flatMap((id) => (find(r, id)?.evidence.some((e) => DID_NOT_BLOCK.test(e)) ? [`"${find(r, id)!.title}" rests on a blocker that did not block`] : [])),
   },
   {
+    id: "fix-matches-blocker",
+    says: "A banner or pop-up never gets bot-block advice, and a block page or CAPTCHA always does.",
+    check: (r) =>
+      ["answer-blockers", "answer-blocked"].flatMap((id) => {
+        const f = find(r, id);
+        if (!f) return [];
+        const blockAdvice = f.fix.steps.some((s) => /automated browsers are blocked|Verified Bots|bot manager/i.test(s));
+        const names = f.title.replace(/^.*?(?:get past|\()/, "");
+        const blocks = /block page|CAPTCHA|login wall|paywall|region block/.test(names);
+        if (!blocks && /banner|pop-up|cookie wall/.test(names) && blockAdvice) return [`"${f.title}" gives bot-block advice for something that only covers the page`];
+        if (/block page|CAPTCHA/.test(names) && !blockAdvice) return [`"${f.title}" names a block, but its fix has no bot-block advice`];
+        return [];
+      }),
+  },
+  {
     id: "server-html-vs-rendering",
     says: "\"Content is in the server HTML\" never sits next to a JavaScript or incomplete-render finding.",
     check: (r) =>

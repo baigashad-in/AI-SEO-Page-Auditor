@@ -1473,6 +1473,7 @@ const BLOCKER_PHRASE: Record<string, string> = {
   broken_page: "a broken page",
   other: "an obstacle",
   block_page: "a block page",
+  banner: "a banner",
 };
 
 // Text that describes a bot block, whatever label the agent picked. Reddit's "You've been blocked by
@@ -1485,11 +1486,20 @@ export function blockerType(x: { type: string; description: string }): string {
   return x.type !== "captcha" && BLOCK_PAGE_TEXT.test(x.description) ? "block_page" : x.type;
 }
 
-export function blockerPhrase(x: { type: string; description: string }): string {
+/**
+ * What a blocker is, for its wording, its fix and whether it is serious, decided in one place so the
+ * three cannot disagree (tinyfish.ai, 2026-10-12: a banner the agent labelled "other" was called "a
+ * banner" but got the bot-block fix). An "other" item is a block page or a banner by its description.
+ */
+export function blockerKind(x: { type: string; description: string }): string {
   const t = blockerType(x);
-  if (t === "block_page" || (t === "other" && ACCESS_BLOCK.test(x.description))) return "a block page";
-  if (t === "other" && BANNER_TEXT.test(x.description)) return "a banner";
-  return BLOCKER_PHRASE[t] || "an obstacle";
+  if (t !== "other") return t;
+  if (ACCESS_BLOCK.test(x.description)) return "block_page";
+  return BANNER_TEXT.test(x.description) ? "banner" : "other";
+}
+
+export function blockerPhrase(x: { type: string; description: string }): string {
+  return BLOCKER_PHRASE[blockerKind(x)] || "an obstacle";
 }
 
 /** One evidence line per blocker, saying so when the agent's label was overridden. */
@@ -1502,7 +1512,7 @@ function blockerEvidence(x: { type: string; description: string }): string {
 }
 
 function blockerFix(x: { type: string; description: string }): string {
-  return BLOCKER_FIX[blockerType(x)] || BLOCKER_FIX.other;
+  return BLOCKER_FIX[blockerKind(x)] || BLOCKER_FIX.other;
 }
 
 // Blocker descriptions that mean the agent never reached the content at all. Whole words only:
@@ -1526,7 +1536,7 @@ export function obstacles(a: AgentAnswer): AgentAnswer["blockers"] {
 }
 
 function isSerious(x: { type: string; description: string }): boolean {
-  return ["login_wall", "paywall", "captcha", "region_block", "broken_page", "block_page"].includes(blockerType(x)) || (x.type === "other" && ACCESS_BLOCK.test(x.description));
+  return ["login_wall", "paywall", "captcha", "region_block", "broken_page", "block_page"].includes(blockerKind(x));
 }
 
 /**
@@ -1576,14 +1586,15 @@ export function locateQuote(b: StageBundle): { inFetch: boolean | null; inRaw: b
 const BLOCKER_FIX: Record<string, string> = {
   captcha:
     "Do not challenge readers on content pages. In Cloudflare, allow Verified Bots and signed AI agents, or lower the security level for these paths. Other bot managers have equivalent allow lists.",
-  other:
-    "Check why automated browsers are blocked (bot manager, WAF rule, rate limit). Allow verified AI agents and search crawlers on public content pages.",
+  // An obstacle the agent did not name and that does not read as a block: point at its description.
+  other: "Check what the agent describes above and keep it from covering or replacing the content on public pages.",
   login_wall: "Keep a public, crawlable summary of the gated content above the login wall.",
   paywall: "Keep a public summary above the paywall, and mark paywalled sections with isAccessibleForFree: false in JSON-LD.",
   region_block: "Serve the public content to all regions, or provide a public version that is not geo-blocked.",
   broken_page: "Fix the error the agent hit, then re-run the audit.",
   cookie_wall: "Use a cookie banner that sits at the bottom of the screen and does not block reading or replace content in the HTML.",
   modal: "Delay newsletter or promo pop-ups, or remove them on content pages.",
+  banner: "Keep announcement banners short and dismissible, and do not let them push the content below the first screen.",
   age_gate: "Show the age gate only where legally required, and keep a short public summary visible behind it.",
   block_page:
     "Check why automated browsers are blocked (bot manager, WAF rule, rate limit). Allow verified AI agents and search crawlers on public content pages.",

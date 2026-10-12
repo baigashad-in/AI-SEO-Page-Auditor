@@ -26,7 +26,12 @@ function jsonFiles(path: string): string[] {
 
 function targets(args: string[]): { files: string[]; label: string } {
   const paths = args.filter((a) => !a.startsWith("--"));
-  if (paths.length) return { files: paths.flatMap(jsonFiles), label: paths.join(", ") };
+  if (paths.length) {
+    const files = paths.flatMap(jsonFiles);
+    // Name folders; for loose files just count them, so the summary line stays short.
+    const folders = paths.filter((p) => existsSync(p) && statSync(p).isDirectory());
+    return { files, label: folders.length === paths.length ? folders.join(", ") : `${files.length} file${files.length === 1 ? "" : "s"} given` };
+  }
   if (args.includes("--all")) return { files: jsonFiles(DEMO_DIR), label: `every run in ${DEMO_DIR}/` };
   // Run folders are named after the run time (2026-10-12-000434), so the last one by name is the newest.
   const runs = existsSync(DEMO_DIR) ? readdirSync(DEMO_DIR).filter((n) => statSync(join(DEMO_DIR, n)).isDirectory()).sort() : [];

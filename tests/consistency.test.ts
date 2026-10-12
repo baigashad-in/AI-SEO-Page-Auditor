@@ -93,6 +93,22 @@ describe("false claims from live runs break their rule", () => {
     expect(rulesBroken(quoted)).not.toContain("text-artifacts");
   });
 
+  it("bot-block advice for a banner (tinyfish.ai, 2026-10-12 16:28)", () => {
+    const r = clean();
+    r.findings.push({
+      id: "answer-blockers",
+      category: "answerability",
+      severity: "low",
+      confidence: "medium",
+      title: "The agent had to get past a banner",
+      evidence: ["other: Top banner announcing Search and Fetch APIs free on every plan, dismissed via Dismiss button"],
+      visibilityImpact: "",
+      fix: { summary: "Do not cover content with overlays", steps: ["Check why automated browsers are blocked (bot manager, WAF rule, rate limit)."], effort: "hours" },
+      sources: ["agent"],
+    });
+    expect(rulesBroken(r)).toContain("fix-matches-blocker");
+  });
+
   it("findings out of severity order, or a Do-today item that is not a finding", () => {
     const r = clean();
     r.findings.reverse();

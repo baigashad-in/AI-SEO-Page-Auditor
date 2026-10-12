@@ -500,3 +500,30 @@ describe("summary lines that must match the findings (2026-10-12 run)", () => {
     expect(line).not.toContain("essentially the same page");
   });
 });
+
+describe("one blocker, one kind: wording and fix agree (tinyfish.ai, 2026-10-12 16:28)", () => {
+  const fixFor = (description: string, answer_found = true) => {
+    const a = agent({ answer_found, answer_summary: answer_found ? "Summary." : null, answer_location: answer_found ? "after_interaction" : "not_on_page", blockers: [{ type: "other", description }] });
+    const f = buildFindings(bundle({ fetch: fetchStage(LONG_TEXT), agent: a })).find((x) => x.id === "answer-blockers" || x.id === "answer-blocked")!;
+    return { title: f.title, steps: f.fix.steps.join(" ") };
+  };
+
+  it("gives a banner banner advice, not bot-block advice", () => {
+    const { title, steps } = fixFor("Top banner announcing Search and Fetch APIs free on every plan, dismissed via Dismiss button");
+    expect(title).toBe("The agent had to get past a banner");
+    expect(steps).toContain("announcement banners");
+    expect(steps).not.toContain("automated browsers are blocked");
+  });
+
+  it("still gives a block page bot-block advice (Reddit)", () => {
+    const { title, steps } = fixFor("The page returned a network security block message preventing access to the subreddit content.", false);
+    expect(title).toContain("a block page");
+    expect(steps).toContain("automated browsers are blocked");
+  });
+
+  it("does not guess bot-block advice for an obstacle it cannot name", () => {
+    const { title, steps } = fixFor("A large image carousel took up the first screen");
+    expect(title).toBe("The agent had to get past an obstacle");
+    expect(steps).not.toContain("automated browsers are blocked");
+  });
+});
