@@ -132,6 +132,11 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
   const renW = br?.rendered?.words ?? null;
   // Rendered counts include hidden text; name the visible share when much of it is hidden.
   const vis = mostlyHiddenVisibleWords(b);
+  // AI search crawler user-agents the server or CDN answered with a block page. When there are any,
+  // crawlers do not simply "receive" the server HTML: some get the block page (Medium, 2026-10-13).
+  const edge = br?.botProbes.filter((p) => p.verdict === "blocked" && AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
+  const receive = edge.length ? "get at most" : "receive";
+  const atBest = edge.length ? " at best" : "";
   const extW = f?.stats?.words ?? null;
   const partial = !!scoreNotes(scores).readability;
   const rd = `${scores.readability}/100${partial ? ", partial score" : ""}`; // inside parentheses
@@ -164,10 +169,17 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     const shown = displayUrl(other.url);
     lines.push(`Another page on the same site ranks #${other.position} for "${q}" instead: ${shown}${shown.endsWith("\u2026") ? "" : "."}`);
   }
-  if (input.browser?.challenge)
+  if (input.browser?.challenge) {
+    const title = input.browser.challenge.title ? ` ("${input.browser.challenge.title}")` : "";
+    // An agent that met no challenge shows the wall is not there for every visitor (Reddit, 2026-10-13:
+    // the remote browser was challenged, all 3 agent runs read the page).
+    const ag = input.agent?.answer;
     lines.push(
-      `A real browser received a bot challenge page${input.browser.challenge.title ? ` ("${input.browser.challenge.title}")` : ""} instead of the content, so AI browsing agents are likely to hit the same wall. Browser-based checks were skipped.`,
+      ag && !agentWasBlocked(ag)
+        ? `A real browser received a bot challenge page${title} instead of the content, so browser-based checks were skipped. The AI browsing agent reached the content without a challenge, so the challenge does not stop every visitor; it depends on how the visitor connects.`
+        : `A real browser received a bot challenge page${title} instead of the content, so AI browsing agents are likely to hit the same wall. Browser-based checks were skipped.`,
     );
+  }
   if (f?.robots.status === "unreadable") lines.push("robots.txt came back unreadable, so whether AI crawlers are allowed is unknown from this run.");
   const rc = input.browser?.rawChallenge;
 
@@ -175,13 +187,13 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
   const snap = gap ? null : snapshotIncomplete(b);
   if (gap && gap.notInRaw.words >= 40 && rawW !== null && !rc) {
     lines.push(
-      `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words. TinyFish Fetch extracted ${gap.fetchWords}, with ${gap.notInRaw.words} words in lines that HTML does not contain, so much of the page text arrives through JavaScript. The remote browser's render was incomplete this run (${renW} words), so Fetch's text is the better guide.`,
+      `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) ${receive} ${rawW} words. TinyFish Fetch extracted ${gap.fetchWords}, with ${gap.notInRaw.words} words in lines that HTML does not contain, so much of the page text arrives through JavaScript. The remote browser's render was incomplete this run (${renW} words), so Fetch's text is the better guide.`,
     );
   } else if (gap) {
     lines.push(`The remote browser's render was incomplete this run: it had ${renW} words, while Fetch extracted ${gap.fetchWords}. Browser-based checks may understate the page.`);
   } else if (snap && rawW !== null && !rc) {
     lines.push(
-      `The remote browser saved the page before it finished loading (${snap.savedWords} words saved, ${snap.shownWords} shown), so browser-based checks may understate the page. Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words.`,
+      `The remote browser saved the page before it finished loading (${snap.savedWords} words saved, ${snap.shownWords} shown), so browser-based checks may understate the page. Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) ${receive} ${rawW} words.`,
     );
   } else if (rc && !input.browser?.challenge) {
     lines.push(
@@ -191,7 +203,7 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     const ratio = rawW / renW;
     if (ratio < 0.7)
       lines.push(
-        `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words; after JavaScript the page has ${renW}${vis ? ` (${vis} of them visible)` : ""}. ${pos ? `The page still ranks #${pos} in TinyFish Search, but ChatGPT, Claude and Perplexity crawlers work from the ${rawW}-word version.` : "Those engines index the smaller version, which makes ranking and citation less likely."}`,
+        `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) ${receive} ${rawW} words; after JavaScript the page has ${renW}${vis ? ` (${vis} of them visible)` : ""}. ${pos ? `The page still ranks #${pos} in TinyFish Search, but ChatGPT, Claude and Perplexity crawlers work from the ${rawW}-word version${atBest}.` : `Those engines index the smaller version${atBest}, which makes ranking and citation less likely.`}`,
       );
     // Rendered text, not visible text: both counts include hidden text, so they compare like with like.
     else if (ratio >= 0.9) lines.push(`The server HTML already carries ${Math.round(ratio * 100)}% of the rendered text, so crawlers that skip JavaScript see essentially the same page as users.`);
@@ -214,7 +226,6 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
         ? `robots.txt, as served to TinyFish, excludes the ${andList(blockedSearch.map((v) => v.bot.operator))} search crawlers. The page still ranks, so the site may treat verified crawlers differently; if those engines get the same file, the page cannot appear in their answers.`
         : `robots.txt excludes the ${andList(blockedSearch.map((v) => v.bot.operator))} search crawlers, so this page cannot appear in those answer engines regardless of its Google ranking.`,
     );
-  const edge = br?.botProbes.filter((p) => p.verdict === "blocked" && AI_BOTS.find((x) => x.token === p.bot)?.purpose !== "training") ?? [];
   if (edge.length)
     lines.push(
       edge.length > 1
@@ -248,15 +259,29 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     } else if (a.evidence_quote && !loc.verified) {
       lines.push(`An AI browsing agent answered "${q}" (${where}). Its quote was paraphrased rather than copied from the page, so which crawlers receive that text could not be checked.`);
     } else if (a.evidence_quote) {
-      const seenBy = [loc.inFetch ? "fetch tools" : null, loc.inRaw ? "non-JavaScript crawlers" : null].filter(Boolean);
+      // The server HTML is what crawlers that skip JavaScript receive, unless the edge answered the AI
+      // crawler user-agents with a block page; then they receive that instead (Medium, 2026-10-13).
+      const rawSeen = loc.inRaw && !edge.length;
+      const seenBy = [loc.inFetch ? "fetch tools" : null, rawSeen ? "non-JavaScript crawlers" : null].filter(Boolean);
       const missedBy = [loc.inFetch === false ? "fetch tools" : null, loc.inRaw === false ? "non-JavaScript crawlers" : null].filter(Boolean);
+      const edgeNote =
+        loc.inRaw && edge.length
+          ? `${seenBy.length ? "It is also" : "Its quote is"} in the server HTML, but the AI search crawler user-agents tested got a block page instead (see above).`
+          : "";
+      // A few words ("The Medium Blog") may be a heading or tagline, not the answer, wherever they appear.
+      const shortNote = isShortQuote(a.evidence_quote)
+        ? `The quote is short ("${truncate(a.evidence_quote, 80)}"), so it may be a heading or tagline rather than the answer; treat this as a weak signal.`
+        : "";
+      const tail = [edgeNote, shortNote].filter(Boolean).join(" ");
       lines.push(
         missedBy.length && isShortQuote(a.evidence_quote)
           ? // Same doubt as the finding: a few words may be a tagline, not the answer.
-            `An AI browsing agent answered "${q}" (${where}) with a short quote ("${truncate(a.evidence_quote, 80)}") that ${missedBy.join(" and ")} do not receive${seenBy.length ? ` (${seenBy.join(" and ")} do)` : ""}. It may be a tagline rather than the answer, so treat this as a weak signal.`
+            `An AI browsing agent answered "${q}" (${where}) with a short quote ("${truncate(a.evidence_quote, 80)}") that ${missedBy.join(" and ")} do not receive${seenBy.length ? ` (${seenBy.join(" and ")} do)` : ""}. It may be a tagline rather than the answer, so treat this as a weak signal.${edgeNote ? ` ${edgeNote}` : ""}`
           : missedBy.length
-          ? `An AI browsing agent answered "${q}" (${where}), but ${missedBy.join(" and ")} never receive that answer${seenBy.length ? `; ${seenBy.join(" and ")} do` : ""}. Answer engines can only quote what they receive.`
-          : `An AI browsing agent answered "${q}" (${where}), and the same answer is in what ${seenBy.join(" and ") || "crawlers"} receive.`,
+          ? `An AI browsing agent answered "${q}" (${where}), but ${missedBy.join(" and ")} never receive that answer${seenBy.length ? `; ${seenBy.join(" and ")} do` : ""}. Answer engines can only quote what they receive.${tail ? ` ${tail}` : ""}`
+          : seenBy.length
+          ? `An AI browsing agent answered "${q}" (${where}), and the same answer is in what ${seenBy.join(" and ")} receive.${tail ? ` ${tail}` : ""}`
+          : `An AI browsing agent answered "${q}" (${where}).${tail ? ` ${tail}` : ""}`,
       );
     }
   }

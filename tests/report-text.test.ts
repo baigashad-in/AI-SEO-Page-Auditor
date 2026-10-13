@@ -619,3 +619,46 @@ describe("the agent strength only says where the answer is when the quote is on 
     );
   });
 });
+
+describe("the summary agrees with the agent and the crawler probes (2026-10-13, v27 run)", () => {
+  const blockedProbe = (bot: string) => ({ bot, userAgent: bot, status: 403, words: 119, challenge: true, verdict: "blocked" as const });
+
+  it("does not say agents will hit a challenge that the agent got past without meeting (Reddit)", () => {
+    const br = { ...browserStage("<p>Prove your humanity</p>"), challenge: { title: "Reddit - Prove your humanity", words: 39 } };
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), browser: br, agent: agent({ evidence_quote: ON_PAGE_QUOTE }) }), { url: PAGE_URL });
+    const line = r.connection.find((l) => l.startsWith("A real browser received a bot challenge"))!;
+    expect(line).not.toContain("likely to hit the same wall");
+    expect(line).toContain("The AI browsing agent reached the content without a challenge, so the challenge does not stop every visitor");
+    expect(r.findings.find((f) => f.id === "access-browser-challenged")!.evidence).toContain(
+      "The AI browsing agent reached the content without a challenge, so the challenge does not stop every visitor.",
+    );
+  });
+
+  it("still warns about the challenge when the agent was stopped too", () => {
+    const br = { ...browserStage("<p>Prove your humanity</p>"), challenge: { title: "Reddit - Prove your humanity", words: 39 } };
+    const blocked = agent({ answer_found: false, answer_summary: null, answer_location: "not_on_page", blockers: [{ type: "block_page", description: "You have been blocked", got_in_the_way: true }] });
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), browser: br, agent: blocked }), { url: PAGE_URL });
+    expect(r.connection.join(" ")).toContain("so AI browsing agents are likely to hit the same wall");
+  });
+
+  it("does not say crawlers receive the server HTML when their user-agents got a block page (Medium)", () => {
+    const raw = `<html><body><p>The Medium Blog. ${"menu ".repeat(45)}</p></body></html>`;
+    const ren = `<html><body><p>The Medium Blog. ${"menu ".repeat(45)}</p><h2>Posts</h2><p>${"story ".repeat(264)}</p></body></html>`;
+    const br = browserStage(raw, ren, { botProbes: ["OAI-SearchBot", "Claude-SearchBot", "PerplexityBot"].map(blockedProbe) });
+    const fe = { ...fetchStage(""), page: null, stats: null, pageError: { url: PAGE_URL, error: "bot_blocked" } };
+    const r = buildReport(bundle({ fetch: fe, browser: br, agent: agent({ evidence_quote: "The Medium Blog" }) }), { url: PAGE_URL });
+    const text = r.connection.join(" ");
+    expect(text).toContain(`Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) get at most ${br.raw!.words} words`);
+    expect(text).toContain("Those engines index the smaller version at best");
+    expect(text).toContain(
+      'An AI browsing agent answered "q" (visible on load). Its quote is in the server HTML, but the AI search crawler user-agents tested got a block page instead (see above). The quote is short ("The Medium Blog"), so it may be a heading or tagline rather than the answer; treat this as a weak signal.',
+    );
+    expect(text).not.toMatch(/\(GPTBot, ClaudeBot, PerplexityBot\) receive|non-JavaScript crawlers receive/);
+  });
+
+  it("keeps 'receive' when no crawler user-agent was blocked", () => {
+    const page = `<html><body><p>${LONG_TEXT}</p></body></html>`;
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), browser: browserStage(page), agent: agent({ evidence_quote: ON_PAGE_QUOTE }) }), { url: PAGE_URL });
+    expect(r.connection.join(" ")).toContain("the same answer is in what fetch tools and non-JavaScript crawlers receive.");
+  });
+});

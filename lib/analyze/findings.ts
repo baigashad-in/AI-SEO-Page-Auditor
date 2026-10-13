@@ -1671,7 +1671,17 @@ export function chooseAgentRun(b: StageBundle): StageBundle {
   if (!b.agent || !runs || runs.length < 2) return b;
   const groups = outcomeGroups(b, runs);
   if (!groups.length) return b;
-  const r = runs.find((x) => runOutcome(b, runAnswer(x)) === groups[0].o)!;
+  // Among the runs with that result, the one with the best evidence: a quote found on the page, then
+  // one longer than a few words, then the longer quote. The v27 run on Substack showed a paraphrase
+  // while two other runs had quotes that were on the page. Ties keep run order.
+  const quality = (x: AgentRun) => {
+    const q = runAnswer(x)?.evidence_quote ?? "";
+    return [locateQuote(withAnswer(b, runAnswer(x))).verified ? 1 : 0, q && !isShortQuote(q) ? 1 : 0, q.length];
+  };
+  const r = runs
+    .filter((x) => runOutcome(b, runAnswer(x)) === groups[0].o)
+    .map((x) => ({ x, k: quality(x) }))
+    .sort((p, q) => q.k[0] - p.k[0] || q.k[1] - p.k[1] || q.k[2] - p.k[2])[0].x;
   const errors = [...new Set(runs.map((x) => x.error).filter((e): e is string => !!e))];
   return {
     ...b,
@@ -2055,6 +2065,8 @@ function challengeChecks(b: StageBundle, out: Finding[]) {
       evidence: [
         `TinyFish Browser received a challenge page: HTTP ${b.browser?.status ?? "n/a"}, ${ch.words} words${ch.title ? `, title "${ch.title}"` : ""}.`,
         fetchGotIt ? `TinyFish Fetch did receive the content (${b.fetch!.stats!.words} words), so the block depends on how the request looks.` : "",
+        // Same point as the summary line: the agent met no challenge, so not every visitor does.
+        b.agent?.answer && !agentWasBlocked(b.agent.answer) ? "The AI browsing agent reached the content without a challenge, so the challenge does not stop every visitor." : "",
         "Checks that need the page HTML (rendering, tags, structured data, crawler user-agent probes) were skipped, because the HTML was the challenge page.",
         "Caveat: requests came from a TinyFish residential IP. Verified crawlers from published IP ranges may be let through.",
       ].filter(Boolean),

@@ -177,6 +177,21 @@ describe("false claims from live runs break their rule", () => {
     expect(rulesBroken(r)).toContain("visible-counts");
   });
 
+  it("'agents are likely to hit the same wall' while the agent read the page (Reddit, 2026-10-13 20:06)", () => {
+    const r = clean();
+    r.stages.agent = agent({ evidence_quote: "Search engine optimization is the practice of improving how pages appear in search results." });
+    r.connection.push('A real browser received a bot challenge page ("Reddit - Prove your humanity") instead of the content, so AI browsing agents are likely to hit the same wall. Browser-based checks were skipped.');
+    expect(rulesBroken(r)).toContain("challenge-vs-agent");
+  });
+
+  it("crawlers 'receive' the server HTML while their user-agents got a block page (Medium, 2026-10-13 20:01)", () => {
+    const r = clean();
+    r.stages.browser!.botProbes = ["OAI-SearchBot", "PerplexityBot"].map((bot) => ({ bot, userAgent: bot, status: 403, words: 119, challenge: true, verdict: "blocked" as const }));
+    r.connection.push("Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive 49 words; after JavaScript the page has 1829.");
+    r.connection.push('An AI browsing agent answered "medium blog" (visible on load), and the same answer is in what non-JavaScript crawlers receive.');
+    expect(checkReport(r).filter((v) => v.rule === "receive-vs-edge-block")).toHaveLength(2);
+  });
+
   it("a visible-on-load strength next to a paraphrased quote (Medium, 2026-10-13 02:07)", () => {
     const r = clean();
     r.connection.push('An AI browsing agent answered "medium blog" (visible on load). Its quote was paraphrased rather than copied from the page, so which crawlers receive that text could not be checked.');

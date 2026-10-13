@@ -6,7 +6,7 @@
 
 import type { AuditReport, Finding } from "../types";
 import { markdownToPlain } from "../parse/markdown";
-import { normForMatch } from "./text";
+import { andList, normForMatch } from "./text";
 
 export interface Rule {
   id: string;
@@ -131,6 +131,33 @@ export const RULES: Rule[] = [
       r.connection.some((l) => l.includes("paraphrased rather than copied")) && r.strengths.some((x) => x.includes("from content visible on load"))
         ? ["a strength says the answer is visible on load, but the summary says the agent's quote was paraphrased"]
         : [],
+  },
+  {
+    id: "challenge-vs-agent",
+    says: "The summary never says AI agents are likely to hit a bot challenge when the agent read the page without meeting one.",
+    check: (r) => {
+      const a = r.stages.agent?.answer;
+      // 2026-10-13: Reddit's summary said agents would hit the wall; all 3 agent runs read the page.
+      const challenged = (a?.blockers ?? []).some(
+        (x) => ["captcha", "block_page", "login_wall", "paywall", "region_block"].includes(x.type) || /blocked|captcha|verify you are human|access denied/i.test(x.description),
+      );
+      return r.connection.some((l) => l.includes("likely to hit the same wall")) && a?.answer_found && !challenged
+        ? ["the summary says AI agents are likely to hit the challenge, but the agent read the page without one"]
+        : [];
+    },
+  },
+  {
+    id: "receive-vs-edge-block",
+    says: "The summary never says crawlers receive the server HTML when the AI search crawler user-agents tested got a block page.",
+    check: (r) => {
+      const blocked = (r.stages.browser?.botProbes ?? []).filter((p) => p.verdict === "blocked" && ["OAI-SearchBot", "Claude-SearchBot", "PerplexityBot"].includes(p.bot));
+      if (!blocked.length) return [];
+      // 2026-10-13: Medium's summary said non-JavaScript crawlers receive 49 words and the agent's
+      // answer, while OAI-SearchBot, Claude-SearchBot and PerplexityBot got HTTP 403 block pages.
+      return r.connection
+        .filter((l) => /\(GPTBot, ClaudeBot, PerplexityBot\) receive|in what [^.]*non-JavaScript crawlers receive/.test(l))
+        .map((l) => `"${l.slice(0, 70)}..." while ${andList(blocked.map((p) => p.bot))} got a block page`);
+    },
   },
   {
     id: "answered-vs-blockers",

@@ -124,6 +124,25 @@ describe("the report with several runs", () => {
   });
 });
 
+describe("which run the report shows among runs with the same result (v27 run, 2026-10-13)", () => {
+  const withQuote = (q: string) => agent({ evidence_quote: q }).answer!;
+
+  it("prefers a quote found on the page over a paraphrase (Substack)", () => {
+    const r = report(runs(withQuote("The newsletter is described as having over ten thousand readers."), withQuote(QUOTE), withQuote(QUOTE)));
+    expect(r.stages.agent!.runId).toBe("r2");
+    expect(r.connection.join(" ")).not.toContain("paraphrased");
+  });
+
+  it("prefers a full sentence over a few words when both are on the page (tinyfish.ai)", () => {
+    const r = report(runs(withQuote("Search engine optimization"), withQuote(QUOTE)));
+    expect(r.stages.agent!.runId).toBe("r2");
+  });
+
+  it("keeps run order when the evidence is equally good", () => {
+    expect(report(runs(withQuote(QUOTE), withQuote(QUOTE), withQuote(QUOTE))).stages.agent!.runId).toBe("r1");
+  });
+});
+
 describe("starting the runs", () => {
   afterEach(() => {
     started.length = 0;
