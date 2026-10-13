@@ -251,6 +251,7 @@ export async function tfStartAgentRun(body: {
   goal: string;
   output_schema?: object;
   browser_profile?: "lite" | "stealth";
+  proxy_config?: { enabled: boolean; country_code?: string };
 }): Promise<{ run_id: string | null; error: { code: string; message: string } | null }> {
   return call("agent", `${host("agent")}/v1/automation/run-async`, { method: "POST", body: JSON.stringify(body) }, 30_000, 1);
 }

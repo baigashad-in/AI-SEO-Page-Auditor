@@ -38,7 +38,7 @@ export async function runFullAudit(input: AuditInput, opts: RunOptions = {}): Pr
     }),
     opts.skipAgent
       ? Promise.resolve(null)
-      : track("Agent", () => runAgentStage(url, query, undefined, (status) => log(`Agent: ${status.toLowerCase()}`)), log, { summary: agentSummary }),
+      : track("Agent", () => runAgentStage(url, query, { location: input.location, onStatus: (status) => log(`Agent: ${status.toLowerCase()}`) }), log, { summary: agentSummary }),
   ]);
 
   return buildReport({ fetch, browser, search, agent, query, queryDerived: derived, url }, inp);

@@ -224,9 +224,20 @@ export interface AgentAnswer {
   evidence_quote: string | null;
   answer_location: AnswerLocation;
   interactions_needed: string[];
-  blockers: { type: string; description: string }[];
+  // got_in_the_way: the agent's own yes/no (since 2026-10-13); absent in older saved reports.
+  blockers: { type: string; description: string; got_in_the_way?: boolean }[];
   page_purpose: string;
   missing_information: string[];
+}
+
+/** One of several agent runs on the same page and question (see AgentStageResult.runs). */
+export interface AgentRun {
+  ok: boolean;
+  runId: string | null;
+  status: string;
+  error?: string;
+  numSteps?: number | null;
+  answer: AgentAnswer | null;
 }
 
 export interface AgentStageResult {
@@ -238,6 +249,9 @@ export interface AgentStageResult {
   query: string;
   answer: AgentAnswer | null;
   calls: CallLog[];
+  // Every run when the agent ran more than once. The fields above then hold the run whose result
+  // was the most common (see chooseAgentRun in analyze/findings.ts).
+  runs?: AgentRun[];
 }
 
 /* Report */

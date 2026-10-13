@@ -4,6 +4,7 @@
 import type { AgentStageResult, AuditInput, AuditReport, BrowserStageResult, FetchStageResult, SearchStageResult } from "../types";
 import { buildReport } from "../analyze/report";
 import { pageSignals, resolveQuery } from "../analyze/query";
+import { mergeAgentRuns } from "../analyze/agentRuns";
 
 export type StageName = "fetch" | "browser" | "search" | "agent";
 export type StageState = { status: "waiting" | "running" | "done" | "failed" | "skipped"; note?: string };
@@ -106,29 +107,46 @@ export async function runAuditInBrowser(input: AuditInput, opts: ClientOptions):
     },
   );
 
+  type Started = { runId: string | null; error?: string; calls: AgentStageResult["calls"] };
   const agentP: Promise<AgentStageResult | null> = opts.useAgent
     ? (async () => {
         try {
-          const started = await post<{ runId: string | null; error?: string; calls: AgentStageResult["calls"] }>("/api/audit/agent/start", { url: input.url, query });
-          if (!started.runId) throw new Error(started.error || "Agent run did not start");
+          // The server starts the same check several times (AGENT_RUNS, default 3); each run is polled here.
+          const { runs } = await post<{ runs: Started[] }>("/api/audit/agent/start", { url: input.url, query, location: input.location });
+          if (!runs.some((r) => r.runId)) throw new Error(runs.map((r) => r.error).find(Boolean) || "Agent run did not start");
+          const n = runs.length;
           const deadline = Date.now() + AGENT_TIMEOUT_MS;
-          let seconds = 0;
-          while (Date.now() < deadline) {
-            await new Promise((r) => setTimeout(r, POLL_MS));
-            seconds += POLL_MS / 1000;
-            const res = await get<AgentStageResult>(`/api/audit/agent/status?runId=${encodeURIComponent(started.runId)}&query=${encodeURIComponent(query)}`);
-            if (["COMPLETED", "FAILED", "CANCELLED"].includes(res.status)) {
-              progress.agent = res.ok
-                ? { status: "done", note: res.answer?.answer_found ? "answer found" : "no answer on page" }
-                : { status: "failed", note: res.error || res.status };
-              emit();
-              return { ...res, calls: [...started.calls, ...res.calls] };
-            }
-            progress.agent = { status: "running", note: `${res.status.toLowerCase()}, ${seconds}s` };
+          const started = Date.now();
+          let finished = 0;
+          const note = (status: string) => {
+            progress.agent = { status: "running", note: `${n > 1 ? `${finished} of ${n} runs finished, ` : `${status.toLowerCase()}, `}${Math.round((Date.now() - started) / 1000)}s` };
             emit();
-          }
-          await get(`/api/audit/agent/status?runId=${encodeURIComponent(started.runId)}&cancel=1`).catch(() => {});
-          throw new Error(`Agent did not finish in ${AGENT_TIMEOUT_MS / 1000}s and was cancelled`);
+          };
+          const one = async (s: Started): Promise<AgentStageResult> => {
+            if (!s.runId) return { ok: false, runId: null, status: "NOT_STARTED", error: s.error, query, answer: null, calls: s.calls };
+            const id = encodeURIComponent(s.runId);
+            while (Date.now() < deadline) {
+              await new Promise((r) => setTimeout(r, POLL_MS));
+              const res = await get<AgentStageResult>(`/api/audit/agent/status?runId=${id}&query=${encodeURIComponent(query)}`);
+              if (["COMPLETED", "FAILED", "CANCELLED"].includes(res.status)) {
+                finished++;
+                note(res.status);
+                return { ...res, calls: [...s.calls, ...res.calls] };
+              }
+              note(res.status);
+            }
+            await get(`/api/audit/agent/status?runId=${id}&cancel=1`).catch(() => {});
+            finished++;
+            const error = `Agent did not finish in ${AGENT_TIMEOUT_MS / 1000}s and was cancelled`;
+            return { ok: false, runId: s.runId, status: "TIMEOUT", error, query, answer: null, calls: [...s.calls, { endpoint: "agent", purpose: "Answerability run", ms: AGENT_TIMEOUT_MS, ok: false, detail: "timed out, cancelled" }] };
+          };
+          const res = mergeAgentRuns(await Promise.all(runs.map(one)));
+          const found = (res.runs ?? [res]).filter((x) => x.ok && x.answer?.answer_found).length;
+          progress.agent = res.ok
+            ? { status: "done", note: n > 1 ? `answer found in ${found} of ${n} runs` : res.answer?.answer_found ? "answer found" : "no answer on page" }
+            : { status: "failed", note: res.error || res.status };
+          emit();
+          return res;
         } catch (e) {
           progress.agent = { status: "failed", note: (e as Error).message };
           emit();

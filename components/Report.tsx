@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { AuditReport, Finding, Category } from "@/lib/types";
 import { reportToMarkdown } from "@/lib/analyze/markdownReport";
 import { scoreNotes } from "@/lib/analyze/scoreNotes";
+import { agentAgreementNote, reportBundle } from "@/lib/analyze/findings";
 import { oneLineError, reportFileBase, rootDomain, sameSite, withoutCallerInstructions } from "@/lib/url";
 
 const CATEGORY_TITLE: Record<Category, string> = {
@@ -160,6 +161,7 @@ export default function Report({ report: r }: { report: AuditReport }) {
   const notes = scoreNotes(s);
   const search = r.stages.search;
   const agent = r.stages.agent?.answer;
+  const runsNote = r.stages.agent ? agentAgreementNote(reportBundle(r)) : null;
   const fetch = r.stages.fetch;
   const browser = r.stages.browser;
   const grouped = CATEGORY_ORDER.map((c) => ({ c, items: r.findings.filter((f) => f.category === c) })).filter((g) => g.items.length);
@@ -307,6 +309,7 @@ export default function Report({ report: r }: { report: AuditReport }) {
               : ""}
             .
           </p>
+          {runsNote && <p>{runsNote}</p>}
           {agent.answer_summary && <p>{agent.answer_summary}</p>}
           {agent.evidence_quote && <blockquote className="quote">{agent.evidence_quote}</blockquote>}
           {agent.interactions_needed.length > 0 && <p>Steps it needed: {agent.interactions_needed.join(", then ")}.</p>}

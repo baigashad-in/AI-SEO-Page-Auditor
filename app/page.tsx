@@ -24,7 +24,7 @@ export default function Home() {
   const [useBrowser, setUseBrowser] = useState(true);
   const [useAgent, setUseAgent] = useState(true);
   const [token, setToken] = useState("");
-  const [health, setHealth] = useState<{ keyConfigured: boolean; tokenRequired: boolean } | null>(null);
+  const [health, setHealth] = useState<{ keyConfigured: boolean; tokenRequired: boolean; agentRuns?: number } | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [report, setReport] = useState<AuditReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +116,7 @@ export default function Home() {
           </label>
           <label>
             <input type="checkbox" checked={useAgent} onChange={(e) => setUseAgent(e.target.checked)} />
-            Ask an AI agent to answer the query on the live page (TinyFish Agent, uses credits, about 1 to 3 minutes)
+            Ask an AI agent to answer the query on the live page (TinyFish Agent{(health?.agentRuns ?? 3) > 1 ? `, ${health?.agentRuns ?? 3} runs at once to see if results differ` : ""}, uses credits per run, about 1 to 3 minutes)
           </label>
         </div>
         <div className="actions">

@@ -7,9 +7,12 @@
 import type { AgentAnswer, AgentStageResult, AnswerLocation, CallLog } from "../types";
 import { tfCancelAgentRun, tfGetAgentRun, tfStartAgentRun, tinyfishErrorText } from "../tinyfish";
 import { parseInputUrl } from "../url";
+import { mergeAgentRuns } from "../analyze/agentRuns";
 
 const LOCATIONS: AnswerLocation[] = ["visible_on_load", "after_scroll", "after_interaction", "other_page", "not_on_page"];
-const BLOCKERS = ["cookie_wall", "modal", "login_wall", "paywall", "captcha", "age_gate", "region_block", "broken_page", "other"];
+// "banner" and "block_page" were added 2026-10-13: without them the agent filed a top banner under
+// modal, cookie_wall or other, and a "you have been blocked" page under login_wall or other.
+const BLOCKERS = ["cookie_wall", "modal", "banner", "login_wall", "paywall", "captcha", "block_page", "age_gate", "region_block", "broken_page", "other"];
 
 export const AGENT_OUTPUT_SCHEMA = {
   type: "object",
@@ -24,8 +27,8 @@ export const AGENT_OUTPUT_SCHEMA = {
       maxItems: 8,
       items: {
         type: "object",
-        properties: { type: { type: "string", enum: BLOCKERS }, description: { type: "string" } },
-        required: ["type", "description"],
+        properties: { type: { type: "string", enum: BLOCKERS }, description: { type: "string" }, got_in_the_way: { type: "boolean" } },
+        required: ["type", "description", "got_in_the_way"],
       },
     },
     page_purpose: { type: "string" },
@@ -56,19 +59,40 @@ export function agentGoal(url: string, query: string): string {
     "- answer_found: true only if this page itself answers the question.",
     "- answer_summary: the answer in one or two sentences, or null.",
     "- evidence_quote: copy one exact sentence from the page that supports the answer (40 words max), or null.",
-    "- answer_location: visible_on_load if readable without scrolling or clicking; after_scroll if you only had to scroll; after_interaction if you had to click or dismiss something on this page first; other_page if this page only links to the answer; not_on_page if absent.",
-    "- interactions_needed: each click or dismissal you needed, in order.",
-    "- blockers: anything that blocked or covered content, with type and a short description.",
+    "- answer_location: visible_on_load if the answer is readable without scrolling or clicking; after_scroll if you only had to scroll; after_interaction only if a click was needed to reveal the answer (opening a tab, accordion or 'read more', or closing something that covered the answer); other_page if this page only links to the answer; not_on_page if absent. Closing a banner or pop-up that did not cover the answer does not make it after_interaction.",
+    "- interactions_needed: each click or dismissal you needed to reach the answer, in order.",
+    "- blockers: everything that covered, interrupted or replaced the content, even if you got past it. type: cookie_wall (cookie consent), modal (a pop-up or dialog over the page), banner (a bar or strip at the top or bottom of the page), login_wall (sign-in needed to see the content), paywall, captcha (a check that you are human), block_page (an 'access denied' or 'you have been blocked' page instead of the content), age_gate, region_block, broken_page (an error page or a page that did not load), other. description: one short sentence. got_in_the_way: true if it covered or replaced content you needed or you had to close or get past it; false if it was only there and did not get in your way.",
     "- page_purpose: one sentence on what the page is for.",
     "- missing_information: up to 5 specific facts someone asking this question would still need that the page does not give.",
   ].join("\n");
 }
 
-export async function startAgentStage(url: string, query: string): Promise<{ runId: string | null; error?: string; calls: CallLog[] }> {
+// Countries TinyFish's agent proxy supports (docs.tinyfish.ai/key-concepts/proxies).
+const PROXY_COUNTRIES = ["US", "GB", "CA", "DE", "FR", "JP", "AU"];
+
+/**
+ * Every agent run goes out from the audit's country (default US, the same country as the Search
+ * check), so runs do not differ by where the agent happened to connect from. A country TinyFish's
+ * proxy does not cover gets no proxy rather than a different country.
+ */
+export function agentProxy(location?: string): { enabled: boolean; country_code?: string } | undefined {
+  const country = (location || "US").trim().toUpperCase();
+  return PROXY_COUNTRIES.includes(country) ? { enabled: true, country_code: country } : undefined;
+}
+
+export async function startAgentStage(url: string, query: string, location?: string): Promise<{ runId: string | null; error?: string; calls: CallLog[] }> {
   const pageUrl = parseInputUrl(url).toString();
   const t = Date.now();
   try {
-    const res = await tfStartAgentRun({ url: pageUrl, goal: agentGoal(pageUrl, query), output_schema: AGENT_OUTPUT_SCHEMA, browser_profile: "lite" });
+    // The standard ("lite") browser on purpose: the audit measures what ordinary AI agents meet, and
+    // the anti-detection "stealth" browser would get past blocks those agents hit.
+    const res = await tfStartAgentRun({
+      url: pageUrl,
+      goal: agentGoal(pageUrl, query),
+      output_schema: AGENT_OUTPUT_SCHEMA,
+      browser_profile: "lite",
+      proxy_config: agentProxy(location),
+    });
     if (!res.run_id) {
       const msg = tinyfishErrorText(res.error?.message || "No run_id returned", "an Agent run");
       return { runId: null, error: msg, calls: [{ endpoint: "agent", purpose: "Start answerability run", ms: Date.now() - t, ok: false, detail: msg }] };
@@ -104,7 +128,12 @@ export function normalizeAgentResult(result: unknown): AgentAnswer | null {
   const blockers = Array.isArray(o.blockers)
     ? (o.blockers as unknown[])
         .filter((b) => b && typeof b === "object")
-        .map((b) => ({ type: String((b as Record<string, unknown>).type ?? "other"), description: String((b as Record<string, unknown>).description ?? "") }))
+        .map((b) => {
+          const o = b as Record<string, unknown>;
+          const x: AgentAnswer["blockers"][number] = { type: String(o.type ?? "other"), description: String(o.description ?? "") };
+          if (typeof o.got_in_the_way === "boolean") x.got_in_the_way = o.got_in_the_way;
+          return x;
+        })
         .slice(0, 8)
     : [];
   return {
@@ -145,32 +174,72 @@ export async function pollAgentStage(runId: string, query: string): Promise<Agen
   }
 }
 
-/** Server-side helper for the CLI: start, poll until done or timeout, cancel on timeout. */
-export async function runAgentStage(
-  url: string,
-  query: string,
-  timeoutMs = 240_000,
-  onStatus?: (status: string) => void, // called when the run's status changes (QUEUED, RUNNING, ...)
-): Promise<AgentStageResult> {
-  const started = await startAgentStage(url, query);
-  if (!started.runId) return { ok: false, runId: null, status: "NOT_STARTED", error: started.error, query, answer: null, calls: started.calls };
-  const deadline = Date.now() + timeoutMs;
+/**
+ * How many times the agent runs per audit: AGENT_RUNS (1 to 5), default 3. The agent is an AI model,
+ * so one run can differ from the next, and some sites block some visits and not others; several runs
+ * show how often each result happens. Each run costs TinyFish credits, so 3 runs cost 3 times as much.
+ */
+export function agentRunCount(value = process.env.AGENT_RUNS): number {
+  const n = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(n) ? Math.min(5, Math.max(1, n)) : 3;
+}
+
+export interface StartedRun {
+  runId: string | null;
+  error?: string;
+  calls: CallLog[];
+}
+
+/** Starts the same check `count` times, one call after another. The runs then work in parallel. */
+export async function startAgentRuns(url: string, query: string, location?: string, count = agentRunCount()): Promise<StartedRun[]> {
+  const out: StartedRun[] = [];
+  for (let i = 0; i < count; i++) out.push(await startAgentStage(url, query, location));
+  return out;
+}
+
+/** The stage result for a run that never started. */
+export function notStarted(s: StartedRun, query: string): AgentStageResult {
+  return { ok: false, runId: null, status: "NOT_STARTED", error: s.error, query, answer: null, calls: s.calls };
+}
+
+/** Poll one started run until it finishes, or cancel it at the deadline. */
+async function waitForRun(s: StartedRun & { runId: string }, query: string, deadline: number, timeoutMs: number, onStatus?: (status: string) => void): Promise<AgentStageResult> {
   let last = "";
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5000));
-    const res = await pollAgentStage(started.runId, query);
+    const res = await pollAgentStage(s.runId, query);
     if (onStatus && res.status !== last) onStatus(res.status);
     last = res.status;
-    if (["COMPLETED", "FAILED", "CANCELLED"].includes(res.status)) return { ...res, calls: [...started.calls, ...res.calls] };
+    if (["COMPLETED", "FAILED", "CANCELLED"].includes(res.status)) return { ...res, calls: [...s.calls, ...res.calls] };
   }
-  await tfCancelAgentRun(started.runId);
+  await tfCancelAgentRun(s.runId);
   return {
     ok: false,
-    runId: started.runId,
+    runId: s.runId,
     status: "TIMEOUT",
     error: `Agent run did not finish in ${Math.round(timeoutMs / 1000)}s and was cancelled.`,
     query,
     answer: null,
-    calls: [...started.calls, { endpoint: "agent", purpose: "Answerability run", ms: timeoutMs, ok: false, detail: "timed out, cancelled" }],
+    calls: [...s.calls, { endpoint: "agent", purpose: "Answerability run", ms: timeoutMs, ok: false, detail: "timed out, cancelled" }],
   };
+}
+
+/** Server-side helper for the CLI: start the runs, poll each until done or timeout, cancel on timeout, merge. */
+export async function runAgentStage(
+  url: string,
+  query: string,
+  opts: { timeoutMs?: number; onStatus?: (status: string) => void; location?: string; count?: number } = {},
+): Promise<AgentStageResult> {
+  const timeoutMs = opts.timeoutMs ?? 240_000;
+  const started = await startAgentRuns(url, query, opts.location, opts.count ?? agentRunCount());
+  const deadline = Date.now() + timeoutMs;
+  const n = started.length;
+  const results = await Promise.all(
+    started.map((s, i) =>
+      s.runId
+        ? waitForRun({ ...s, runId: s.runId }, query, deadline, timeoutMs, opts.onStatus && ((status) => opts.onStatus!(n > 1 ? `${status} (run ${i + 1} of ${n})` : status)))
+        : Promise.resolve(notStarted(s, query)),
+    ),
+  );
+  return mergeAgentRuns(results);
 }

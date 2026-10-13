@@ -47,11 +47,13 @@ const serp = await tfSearch({ query, location: "US", page: 0 });
 const probe = await tfSearch({ query: pageTitle, includeDomains: [rootDomain(pageUrl)] });
 
 // Agent: can an AI agent answer the query on the live page? (lib/stages/agentStage.ts)
+// Started 3 times (AGENT_RUNS); the report uses the most common result and says when runs differ.
 const { run_id } = await tfStartAgentRun({
   url: pageUrl,
-  goal: agentGoal(pageUrl, query), // "Stay on this exact page... report answer_found, evidence_quote, answer_location..."
+  goal: agentGoal(pageUrl, query), // "Stay on this exact page... report answer_found, evidence_quote, answer_location, blockers..."
   output_schema: AGENT_OUTPUT_SCHEMA,
-  browser_profile: "lite",
+  browser_profile: "lite", // the standard browser: the audit measures what ordinary AI agents meet
+  proxy_config: { enabled: true, country_code: "US" }, // every run from the audit's country
 });
 const run = await tfGetAgentRun(run_id); // poll GET /v1/runs/{id} until COMPLETED
 ```
@@ -72,6 +74,7 @@ Environment variables (server side only, never sent to the browser):
 | Variable | Required | Purpose |
 | :- | :- | :- |
 | `TINYFISH_API_KEY` | yes | Key for Search, Fetch, Browser and Agent |
+| `AGENT_RUNS` | no | How many times the agent runs per audit, 1 to 5 (default 3). Each run uses Agent credits. |
 | `AUDITOR_ACCESS_TOKEN` | no | If set, the UI asks for this token before running audits. Use it when deploying publicly so others cannot spend your credits. |
 | `TINYFISH_SEARCH_URL`, `TINYFISH_FETCH_URL`, `TINYFISH_BROWSER_URL`, `TINYFISH_AGENT_URL` | no | Override API hosts. Only for the offline test harness. |
 
@@ -129,7 +132,7 @@ The stages feed each other rather than running side by side. The Agent's evidenc
 | **Fetch** | 2 to 3 batches | Extraction of the page plus its robots.txt, llms.txt and sitemap; later the top 3 competing pages. | This is what an AI fetch tool reads. Its `title`, `description`, `author` and `published_date` fields show which metadata survives extraction. |
 | **Browser** | 1 session | Raw server HTML (before JavaScript), rendered DOM, headers, screenshot, robots.txt read as plain text from inside the page, and the page requested again on the same tab as the AI search crawlers OAI-SearchBot, Claude-SearchBot and PerplexityBot (plus ClaudeBot, a training crawler, for reference), loading only the HTML document. | Fetch returns already-cleaned content, so it cannot show what exists before JavaScript runs, read canonical, meta robots or JSON-LD, or reveal edge blocking of AI crawler user-agents. |
 | **Search** | 2 to 3 queries | Rank for the target query (top 20), an index probe (the page's own title within its own domain), and the pages that outrank it. | Visibility: is the page found, for what, and who wins instead. |
-| **Agent** | 1 run | Tries to answer the query on the live page; may dismiss pop-ups and open tabs. Structured output: answer found, exact evidence quote, where it was, blockers, missing information. | The only API that interacts with the page, so it finds answers hidden behind clicks and overlays. |
+| **Agent** | 3 runs (`AGENT_RUNS`) | Tries to answer the query on the live page; may dismiss pop-ups and open tabs. Structured output: answer found, exact evidence quote, where it was, blockers (with the agent's own yes or no on whether each got in the way), missing information. The runs work in parallel, each from a proxy in the audit's country with the standard browser; the report uses the most common result and lists every run when they differ. | The only API that interacts with the page, so it finds answers hidden behind clicks and overlays. |
 
 Fetch is asked for a live copy (`ttl: 0`). Per the SDK notes, Fetch may still serve a cached copy when the site's own Cache-Control allows it. Browser and Agent always load the live page.
 
@@ -167,7 +170,7 @@ Every finding lists its evidence, which TinyFish API produced it, a confidence l
 
 ## Cost and limits
 
-From the TinyFish docs at the time of writing: Search is free up to 12,000 requests a day and Fetch up to 1,000 URLs a day; Browser and Agent use credits. One audit uses about 3 searches, 6 to 10 fetched URLs, one browser session and one agent run. The client backs off on rate limits, and the batch demo pauses 20 seconds between pages.
+From the TinyFish docs at the time of writing: Search is free up to 12,000 requests a day and Fetch up to 1,000 URLs a day; Browser and Agent use credits. One audit uses about 3 searches, 6 to 10 fetched URLs, one browser session and three agent runs (set `AGENT_RUNS=1` to use a third of the Agent credits). The client backs off on rate limits, and the batch demo pauses 20 seconds between pages.
 
 Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow that, or the Browser stage may be cut off on slow pages.
 
@@ -175,7 +178,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 
 * **Rankings are TinyFish Search rankings** from its own index, not Google positions. Treat them as directional.
 * **Crawler user-agent probes come from a TinyFish residential IP.** Real crawlers use verified IP ranges, so a block in the probe is strong evidence and a pass is weak evidence.
-* **The agent's judgment can be wrong.** The report shows its evidence quote so you can check it.
+* **The agent's judgment can be wrong, and it can differ between runs.** It is an AI model with no setting for repeatable answers, and some sites block some visits and not others. That is why it runs 3 times: the report uses the most common result and says when the runs differ. The report also shows its evidence quote so you can check it.
 * **Scores are heuristics** for comparing runs and pages, not an industry standard.
 * **Topic gaps are lexical:** they compare words and phrases, not meaning.
 * **One page per audit;** no site crawl.
@@ -183,7 +186,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 214 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
+npm test           # 235 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
 npm run typecheck
 npm run check      # report rules on your saved demo runs (see How to run)
 ```

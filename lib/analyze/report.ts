@@ -2,7 +2,7 @@
 // connection, findings, and the "do today" list.
 
 import type { AuditReport, CallLog, Scores } from "../types";
-import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, isShortQuote, locateQuote, missingStages, mostlyHiddenVisibleWords, obstacles, seriousBlockers, snapshotIncomplete, usableStages, type StageBundle } from "./findings";
+import { agentRunsLine, agentWasBlocked, answerabilityOf, answeredOnOtherPage, chooseAgentRun, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, isShortQuote, locateQuote, missingStages, mostlyHiddenVisibleWords, obstacles, seriousBlockers, snapshotIncomplete, usableStages, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
 import { andList, truncate } from "./text";
 import { bareHost, displayUrl } from "../url";
@@ -97,16 +97,7 @@ export function computeScores(input: StageBundle): Scores {
   const vmax = vparts.reduce((x, p) => x + p.max, 0);
   const visibility = vmax ? Math.round((vparts.reduce((x, p) => x + p.score, 0) / vmax) * 100) : null;
 
-  const a = b.agent?.answer;
-  const answerability: Scores["answerability"] = !a
-    ? "unknown"
-    : !a.answer_found
-      ? "not_answered"
-      : answeredOnOtherPage(a) && !locateQuote(input).verified
-        ? "answered_elsewhere"
-        : (a.answer_location === "visible_on_load" || a.answer_location === "after_scroll") && !seriousBlockers(a).length
-        ? "answered"
-        : "answered_with_effort";
+  const answerability = answerabilityOf(input, b.agent?.answer ?? null);
 
   const ranks = s?.target.position != null;
   const quadrant: Scores["quadrant"] =
@@ -270,13 +261,17 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     }
   }
 
+  const runsLine = agentRunsLine(input);
+  if (runsLine) lines.push(runsLine);
+
   lines.push("Rankings come from TinyFish Search, which runs its own index; treat positions as directional, not as Google positions.");
   return lines;
 }
 
 export function buildReport(stages: StageBundle, input: { url: string; query?: string; location?: string }): AuditReport {
   // Use the plain-text robots.txt from the browser when it parses (see robotsSource.ts).
-  const b = withBrowserRobots(stages);
+  // With several agent runs, every score and finding uses the most common result (see chooseAgentRun).
+  const b = chooseAgentRun(withBrowserRobots(stages));
   const scores = computeScores(b);
   const findings = buildFindings(b);
   const doToday = findings

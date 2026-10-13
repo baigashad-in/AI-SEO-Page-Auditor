@@ -13,6 +13,7 @@ const CDP_HTTP = "http://127.0.0.1:9222";
 const SITE_PORT = 4100;
 const API_PORT = 4200;
 let browser: Browser | null = null;
+let runCounter = 0;
 
 async function getBrowser() {
   if (!browser) browser = await chromium.connectOverCDP(CDP_HTTP);
@@ -167,7 +168,8 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   if (u.pathname === "/agent/v1/automation/run-async" && req.method === "POST") {
     const b = JSON.parse(await body(req));
     if (!b.url || !b.goal || !b.output_schema) return json(res, 400, { error: { code: "INVALID_INPUT", message: "url, goal, output_schema" } });
-    const id = `run_${Date.now()}`;
+    // A counter as well as the time: an audit starts several runs within the same millisecond.
+    const id = `run_${Date.now()}_${++runCounter}`;
     runs.set(id, 0);
     return json(res, 200, { run_id: id, error: null });
   }
@@ -189,7 +191,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
         evidence_quote: "You get a full refund within 30 days of purchase, no questions asked.",
         answer_location: "after_interaction",
         interactions_needed: ["Dismissed cookie overlay", "Clicked the Refund policy tab"],
-        blockers: [{ type: "cookie_wall", description: "Full-screen cookie overlay covered the content until accepted" }],
+        blockers: [{ type: "cookie_wall", description: "Full-screen cookie overlay covered the content until accepted", got_in_the_way: true }],
         page_purpose: "Pricing page for Acme project management plans.",
         missing_information: ["Whether annual billing is discounted", "Whether there is a free trial"],
       },

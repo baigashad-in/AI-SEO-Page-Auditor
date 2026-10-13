@@ -49,6 +49,12 @@ export function searchSummary(r: SearchStageResult): string {
 }
 
 export function agentSummary(r: AgentStageResult): string {
+  if (r.runs && r.runs.length > 1) {
+    const done = r.runs.filter((x) => x.ok && x.answer);
+    const found = done.filter((x) => x.answer!.answer_found).length;
+    const notDone = r.runs.length - done.length;
+    return `${r.runs.length} runs: answer found in ${found}, not found in ${done.length - found}${notDone ? `, ${notDone} did not finish` : ""}`;
+  }
   if (!r.ok) return `${r.status}: ${r.error ?? "no result"}`;
   return r.answer?.answer_found ? "answer found" : "no answer on the page";
 }

@@ -4,11 +4,13 @@
 
 import type {
   AgentAnswer,
+  AgentRun,
   AgentStageResult,
   BrowserStageResult,
   Finding,
   FetchStageResult,
   SearchStageResult,
+  Scores,
   Severity,
   Source,
 } from "../types";
@@ -1557,11 +1559,15 @@ const DID_NOT_BLOCK =
   /\b(?:did ?n[o'\u2019]t|does ?n[o'\u2019]t|do ?n[o'\u2019]t|was ?n[o'\u2019]t|is ?n[o'\u2019]t|without|never|not)\s+(?:\w+\s+){0,2}?(?:block|obstruct|prevent|stop|hide|cover|interfere)\w*|\b(?:still|remained|fully)\s+(?:accessible|readable|visible|available)\b/i;
 
 /**
- * The blockers that got in the agent's way. A banner, pop-up or "other" item whose own description
- * says it did not block is dropped; walls and CAPTCHAs always count.
+ * The blockers that got in the agent's way. Walls, CAPTCHAs and block pages always count. A banner,
+ * pop-up, cookie notice or "other" item is dropped when the agent says it did not get in the way:
+ * its got_in_the_way answer is false, or its description says so (the only signal in reports saved
+ * before that field existed, and a check on an answer that contradicts its own description).
  */
 export function obstacles(a: AgentAnswer): AgentAnswer["blockers"] {
-  return a.blockers.filter((x) => !["other", "modal", "cookie_wall"].includes(x.type) || !DID_NOT_BLOCK.test(x.description));
+  return a.blockers.filter(
+    (x) => !["other", "modal", "cookie_wall", "banner"].includes(x.type) || (x.got_in_the_way !== false && !DID_NOT_BLOCK.test(x.description)),
+  );
 }
 
 function isSerious(x: { type: string; description: string }): boolean {
@@ -1610,6 +1616,166 @@ export function locateQuote(b: StageBundle): { inFetch: boolean | null; inRaw: b
   const inRaw = rawText !== null ? quoteAppearsIn(quote, rawText) : null;
   const inRendered = renderedText !== null ? quoteAppearsIn(quote, renderedText) : null;
   return { inFetch, inRaw, inRendered, verified: !!(inFetch || inRaw || inRendered) };
+}
+
+/* Several agent runs on the same page and question (AgentStageResult.runs) */
+
+const withAnswer = (b: StageBundle, a: AgentAnswer | null): StageBundle => (b.agent ? { ...b, agent: { ...b.agent, answer: a } } : b);
+const runAnswer = (r: AgentRun): AgentAnswer | null => (r.ok ? r.answer : null);
+
+/** The answerability score one agent answer earns on this page. The score and the run comparison both use it. */
+export function answerabilityOf(input: StageBundle, a: AgentAnswer | null): Scores["answerability"] {
+  if (!a) return "unknown";
+  if (!a.answer_found) return "not_answered";
+  if (answeredOnOtherPage(a) && !locateQuote(withAnswer(input, a)).verified) return "answered_elsewhere";
+  return (a.answer_location === "visible_on_load" || a.answer_location === "after_scroll") && !seriousBlockers(a).length ? "answered" : "answered_with_effort";
+}
+
+export type RunOutcome = Exclude<Scores["answerability"], "unknown"> | "blocked" | "no_result";
+
+// Least favourable first: on a tie the report shows the worse result, so it never overstates.
+const OUTCOME_ORDER: RunOutcome[] = ["blocked", "not_answered", "answered_elsewhere", "answered_with_effort", "answered"];
+
+const OUTCOME_SHORT: Record<RunOutcome, string> = {
+  answered: "answered",
+  answered_with_effort: "answered with effort",
+  answered_elsewhere: "answered from another page",
+  not_answered: "no answer",
+  blocked: "blocked",
+  no_result: "did not finish",
+};
+
+/** What one run amounts to: its answerability score, with "blocked" told apart from "no answer". */
+export function runOutcome(b: StageBundle, a: AgentAnswer | null): RunOutcome {
+  const s = answerabilityOf(b, a);
+  if (s === "unknown") return "no_result";
+  return s === "not_answered" && agentWasBlocked(a!) ? "blocked" : s;
+}
+
+/** Outcomes of the finished runs, most common first; on a tie, the less favourable first. */
+function outcomeGroups(b: StageBundle, runs: AgentRun[]): { o: RunOutcome; n: number }[] {
+  const counts = new Map<RunOutcome, number>();
+  for (const r of runs) {
+    const o = runOutcome(b, runAnswer(r));
+    if (o !== "no_result") counts.set(o, (counts.get(o) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([o, n]) => ({ o, n })).sort((x, y) => y.n - x.n || OUTCOME_ORDER.indexOf(x.o) - OUTCOME_ORDER.indexOf(y.o));
+}
+
+/**
+ * The bundle with the agent's fields taken from the run whose result was the most common, so every
+ * score and finding describes the typical visit. One run, or none finished, leaves it as it is.
+ */
+export function chooseAgentRun(b: StageBundle): StageBundle {
+  const runs = b.agent?.runs;
+  if (!b.agent || !runs || runs.length < 2) return b;
+  const groups = outcomeGroups(b, runs);
+  if (!groups.length) return b;
+  const r = runs.find((x) => runOutcome(b, runAnswer(x)) === groups[0].o)!;
+  const errors = [...new Set(runs.map((x) => x.error).filter((e): e is string => !!e))];
+  return {
+    ...b,
+    agent: { ...b.agent, ok: r.ok, runId: r.runId, status: r.status, error: r.ok ? r.error : errors.join("; ") || r.error, numSteps: r.numSteps ?? null, answer: r.answer },
+  };
+}
+
+/** How many finished runs match the result the report shows. Null for a single run. */
+export function agentAgreement(b: StageBundle): { same: number; finished: number; total: number } | null {
+  const runs = b.agent?.runs;
+  if (!b.agent || !runs || runs.length < 2) return null;
+  const shown = runOutcome(b, b.agent.ok ? b.agent.answer : null);
+  const outcomes = runs.map((r) => runOutcome(b, runAnswer(r)));
+  return { same: outcomes.filter((o) => o === shown).length, finished: outcomes.filter((o) => o !== "no_result").length, total: runs.length };
+}
+
+/** The agent stage of a saved report as a bundle, for agentAgreement and friends. */
+export function reportBundle(r: { stages: Pick<StageBundle, "fetch" | "browser" | "search" | "agent">; query: string; queryDerived: boolean; input: { url: string } }): StageBundle {
+  return { fetch: r.stages.fetch, browser: r.stages.browser, search: r.stages.search, agent: r.stages.agent, query: r.query, queryDerived: r.queryDerived, url: r.input.url };
+}
+
+/** "2 of 3 runs got this result", for the agent section of the page. Null for a single run. */
+export function agentAgreementNote(b: StageBundle): string | null {
+  const g = agentAgreement(b);
+  if (!g) return null;
+  if (g.same === g.total) return `All ${g.total} runs got this result.`;
+  if (g.finished === 1) return `Only 1 of the ${g.total} runs finished.`;
+  if (g.same === g.finished) return `The ${g.finished} runs that finished all got this result; ${g.total - g.finished} did not finish.`;
+  return `${g.same} of ${g.total} runs got this result, the most common one; "AI agent results differ between runs" lists every run.`;
+}
+
+/** One run in a few words, for the evidence list. */
+function runPhrase(b: StageBundle, r: AgentRun): string {
+  const a = runAnswer(r);
+  const o = runOutcome(b, a);
+  if (!a || o === "no_result") return `did not finish (${oneLineError(r.error || r.status, 120)})`;
+  if (o === "blocked") return `blocked (${andList([...new Set(obstacles(a).map(blockerPhrase))])})`;
+  if (o === "not_answered") return "found no answer on the page";
+  if (o === "answered_elsewhere") return "answered only from another page it opened";
+  if (o === "answered") return `answered (${a.answer_location.replace(/_/g, " ")})`;
+  const serious = seriousBlockers(a);
+  if (serious.length) return `answered after getting past ${andList([...new Set(serious.map(blockerPhrase))])}`;
+  const steps = a.interactions_needed.slice(0, 2).map((x) => truncate(x, 80));
+  return `answered only after interacting with the page${steps.length ? ` (${steps.join(", then ")})` : ""}`;
+}
+
+/** The summary line about repeated runs. Null for a single run, or when no run finished. */
+export function agentRunsLine(b: StageBundle): string | null {
+  const runs = b.agent?.runs;
+  if (!runs || runs.length < 2) return null;
+  const n = runs.length;
+  const groups = outcomeGroups(b, runs);
+  const finished = groups.reduce((x, g) => x + g.n, 0);
+  if (!finished) return null;
+  const unfinished = n - finished;
+  // Runs that did not start or finish (a rate limit, a timeout) leave nothing to compare.
+  if (finished === 1) return `Only 1 of the ${n} agent runs finished, so its result could not be compared with other runs.`;
+  if (groups.length === 1)
+    return unfinished
+      ? `The agent ran ${n} times on the same question; the ${finished} that finished got the same result, and ${unfinished} did not finish.`
+      : `The agent ran ${n} times on the same question and got the same result each time.`;
+  const tie = groups[1].n === groups[0].n;
+  const challenged = groups.some((g) => g.o === "blocked") || runs.some((r) => !!runAnswer(r) && seriousBlockers(runAnswer(r)!).length > 0);
+  return (
+    `The agent ran ${n} times on the same question and the results differed: ${andList(groups.map((g) => `${OUTCOME_SHORT[g.o]} in ${g.n}`))}${unfinished ? `; ${unfinished} did not finish` : ""}. ` +
+    `This report uses the most common result${tie ? " (the less favourable one, since they were tied)" : ""}.` +
+    (challenged ? " The site seems to challenge some visits and not others." : "")
+  );
+}
+
+function agentRunsCheck(b: StageBundle, out: Finding[]) {
+  const runs = b.agent?.runs;
+  if (!b.agent || !runs || runs.length < 2) return;
+  const groups = outcomeGroups(b, runs);
+  if (groups.length < 2) return;
+  const shown = b.agent.ok ? b.agent.answer : null;
+  const shownChallenged = !!shown && seriousBlockers(shown).length > 0;
+  const challenged = runs.map(runAnswer).filter((a): a is AgentAnswer => !!a && seriousBlockers(a).length > 0);
+  out.push({
+    id: "answer-runs-differ",
+    category: "answerability",
+    // Some visits were challenged while the typical one was not: no other finding says so.
+    severity: challenged.length && !shownChallenged ? "medium" : "low",
+    confidence: "medium",
+    title: `AI agent results differ between runs: ${andList(groups.map((g) => `${OUTCOME_SHORT[g.o]} in ${g.n} of ${runs.length}`))}`,
+    evidence: [
+      ...runs.map((r, i) => `Run ${i + 1}: ${runPhrase(b, r)}${r.ok && r.numSteps != null ? `, ${r.numSteps} steps` : ""}.`),
+      `The scores and other findings use the most common result (${OUTCOME_SHORT[runOutcome(b, shown)]}).`,
+    ],
+    visibilityImpact:
+      "AI agents that visit at different times get different results. A page that some visits cannot get through, or where the answer is not always found, is cited in some AI answers and missing from others.",
+    fix: challenged.length
+      ? {
+          summary: "Let every AI agent visit through, not just some",
+          steps: [...new Set(challenged.flatMap((a) => seriousBlockers(a).map(blockerFix))), "Re-run the audit to see how often the block happens."],
+          effort: "hours",
+        }
+      : {
+          summary: "Make the answer easy to find on every visit",
+          steps: ["Put the answer near the top of the page, in plain words that match the question.", "Re-run the audit; the runs should agree."],
+          effort: "hours",
+        },
+    sources: ["agent"],
+  });
 }
 
 const BLOCKER_FIX: Record<string, string> = {
@@ -1959,6 +2125,7 @@ export function buildFindings(input: StageBundle): Finding[] {
   visibilityChecks(b, out);
   contentGapChecks(b, out);
   answerabilityChecks(input, out);
+  agentRunsCheck(input, out);
   stageNotes(input, out);
   // De-duplicate by id (first wins) and sort.
   const seen = new Set<string>();
