@@ -286,6 +286,8 @@ export interface AuditReport {
     blockedNote?: string | null; // why the browser word counts are missing (e.g. a bot challenge)
     rawWords: number | null;
     renderedWords: number | null;
+    // Visible words, only when much of the rendered text is hidden (see mostlyHiddenVisibleWords).
+    visibleWords?: number | null;
     extractedWords: number | null;
     rawSample: string;
     extractedSample: string;

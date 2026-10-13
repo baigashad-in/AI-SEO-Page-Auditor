@@ -2,7 +2,7 @@
 // connection, findings, and the "do today" list.
 
 import type { AuditReport, CallLog, Scores } from "../types";
-import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, isShortQuote, locateQuote, missingStages, obstacles, seriousBlockers, snapshotIncomplete, usableStages, type StageBundle } from "./findings";
+import { agentWasBlocked, answeredOnOtherPage, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, isShortQuote, locateQuote, missingStages, mostlyHiddenVisibleWords, obstacles, seriousBlockers, snapshotIncomplete, usableStages, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
 import { andList, truncate } from "./text";
 import { bareHost, displayUrl } from "../url";
@@ -139,6 +139,8 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
   const pos = s?.target.position ?? null;
   const rawW = br?.raw?.words ?? null;
   const renW = br?.rendered?.words ?? null;
+  // Rendered counts include hidden text; name the visible share when much of it is hidden.
+  const vis = mostlyHiddenVisibleWords(b);
   const extW = f?.stats?.words ?? null;
   const partial = !!scoreNotes(scores).readability;
   const rd = `${scores.readability}/100${partial ? ", partial score" : ""}`; // inside parentheses
@@ -185,22 +187,23 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
       `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words. TinyFish Fetch extracted ${gap.fetchWords}, with ${gap.notInRaw.words} words in lines that HTML does not contain, so much of the page text arrives through JavaScript. The remote browser's render was incomplete this run (${renW} words), so Fetch's text is the better guide.`,
     );
   } else if (gap) {
-    lines.push(`The remote browser's render was incomplete this run: it showed ${renW} words, while Fetch extracted ${gap.fetchWords}. Browser-based checks may understate the page.`);
+    lines.push(`The remote browser's render was incomplete this run: it had ${renW} words, while Fetch extracted ${gap.fetchWords}. Browser-based checks may understate the page.`);
   } else if (snap && rawW !== null && !rc) {
     lines.push(
       `The remote browser saved the page before it finished loading (${snap.savedWords} words saved, ${snap.shownWords} shown), so browser-based checks may understate the page. Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words.`,
     );
   } else if (rc && !input.browser?.challenge) {
     lines.push(
-      `The first HTML response is a bot challenge (${rc.reason}); a browser gets through after JavaScript runs${renW !== null ? ` and sees ${renW} words` : ""}. Crawlers that skip JavaScript (GPTBot, ClaudeBot, PerplexityBot) stop at the challenge, so those engines have nothing to index.`,
+      `The first HTML response is a bot challenge (${rc.reason}); a browser gets through after JavaScript runs${renW !== null ? `, and the page then has ${renW} words${vis ? ` (${vis} of them visible)` : ""}` : ""}. Crawlers that skip JavaScript (GPTBot, ClaudeBot, PerplexityBot) stop at the challenge, so those engines have nothing to index.`,
     );
   } else if (rawW !== null && renW !== null && renW >= 120) {
     const ratio = rawW / renW;
     if (ratio < 0.7)
       lines.push(
-        `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words; a browser shows ${renW}. ${pos ? `The page still ranks #${pos} in TinyFish Search, but ChatGPT, Claude and Perplexity crawlers work from the ${rawW}-word version.` : "Those engines index the smaller version, which makes ranking and citation less likely."}`,
+        `Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive ${rawW} words; after JavaScript the page has ${renW}${vis ? ` (${vis} of them visible)` : ""}. ${pos ? `The page still ranks #${pos} in TinyFish Search, but ChatGPT, Claude and Perplexity crawlers work from the ${rawW}-word version.` : "Those engines index the smaller version, which makes ranking and citation less likely."}`,
       );
-    else if (ratio >= 0.9) lines.push(`The server HTML already carries ${Math.round(ratio * 100)}% of the visible text, so crawlers that skip JavaScript see essentially the same page as users.`);
+    // Rendered text, not visible text: both counts include hidden text, so they compare like with like.
+    else if (ratio >= 0.9) lines.push(`The server HTML already carries ${Math.round(ratio * 100)}% of the rendered text, so crawlers that skip JavaScript see essentially the same page as users.`);
     else {
       // 70 to 90%: name what JavaScript adds, so the reader can tell a banner from content (Wikipedia's
       // fundraising banner, 2026-10-11, added "Donor-Advised Fund (DAF)" and similar headings).
@@ -305,6 +308,7 @@ export function buildReport(stages: StageBundle, input: { url: string; query?: s
               : null,
       rawWords: b.browser?.challenge || b.browser?.rawChallenge ? null : (b.browser?.raw?.words ?? null),
       renderedWords: b.browser?.challenge ? null : (b.browser?.rendered?.words ?? null),
+      visibleWords: mostlyHiddenVisibleWords(b),
       extractedWords: b.fetch?.stats?.words ?? null,
       rawSample: truncate(b.browser?.raw?.text ?? "", 700),
       extractedSample: truncate(extracted, 700),

@@ -17,6 +17,37 @@ const SEV_LABEL: Record<Finding["severity"], string> = {
   info: "INFO",
 };
 
+/**
+ * "What each reader sees": a word count, or why there is none ("n/a words" said neither).
+ * The rendered count names its visible share when much of the text is hidden.
+ */
+function readerLines(r: AuditReport): string[] {
+  const br = r.stages.browser;
+  const fe = r.stages.fetch;
+  const browserWhy = !br
+    ? "not measured (Browser stage skipped)"
+    : br.challenge
+      ? "not available (bot challenge page)"
+      : !br.ok
+        ? "not measured (Browser stage failed)"
+        : "not measured";
+  const rawWhy = br?.rawChallenge ? "not available (the first response was a bot challenge page)" : browserWhy;
+  const fetchWhy = fe?.pageError
+    ? `none (Fetch could not read the page: ${fe.pageError.error})`
+    : !fe
+      ? "not measured (Fetch stage skipped)"
+      : fe.error
+        ? "not measured (Fetch stage failed)"
+        : "not measured";
+  const v = r.views;
+  const rendered = v.renderedWords === null ? browserWhy : `${v.renderedWords} words${v.visibleWords ? `, ${v.visibleWords} of them visible` : ""}`;
+  return [
+    `* Raw server HTML (non-JavaScript crawlers): ${v.rawWords === null ? rawWhy : `${v.rawWords} words`}`,
+    `* Rendered page (browser): ${rendered}`,
+    `* AI fetch extraction (TinyFish Fetch): ${v.extractedWords === null ? fetchWhy : `${v.extractedWords} words`}`,
+  ];
+}
+
 function findingMd(f: Finding): string {
   const lines = [
     `### [${SEV_LABEL[f.severity]}] ${f.title}`,
@@ -69,9 +100,7 @@ export function reportToMarkdown(r: AuditReport): string {
     "## What each reader sees",
     "",
     ...(r.views.blockedNote ? [`* ${r.views.blockedNote}`] : []),
-    `* Raw server HTML (non-JavaScript crawlers): ${r.views.rawWords ?? "n/a"} words`,
-    `* Rendered page (browser): ${r.views.renderedWords ?? "n/a"} words`,
-    `* AI fetch extraction (TinyFish Fetch): ${r.views.extractedWords ?? "n/a"} words`,
+    ...readerLines(r),
     "",
     "## TinyFish calls",
     "",

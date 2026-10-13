@@ -36,6 +36,8 @@ function ownText(r: AuditReport): string {
 
 const DID_NOT_BLOCK = /\b(?:did ?n[o'’]t|does ?n[o'’]t|without|never)\s+(?:\w+\s+){0,2}?(?:block|obstruct|prevent|stop|cover)/i;
 const SEVERITY = ["critical", "high", "medium", "low", "info"];
+// A blocker evidence line: "<label>: <the agent's description>".
+const BLOCKER_LINE = /^(other|modal|cookie wall|pop-up|login wall|paywall|CAPTCHA|age gate|region block|broken page|obstacle|block page|banner): (.*)$/;
 
 export const RULES: Rule[] = [
   {
@@ -78,6 +80,57 @@ export const RULES: Rule[] = [
         ? [`the server-HTML strength is claimed, but the page showed ${inner} words against ${saved} saved`]
         : [];
     },
+  },
+  {
+    id: "blocker-label-matches-title",
+    says: "Each blocker's evidence label names the kind its finding's title names, never the agent's raw \"other\" or \"modal\", and a banner is never called a pop-up.",
+    check: (r) =>
+      ["answer-blockers", "answer-blocked"].flatMap((id) => {
+        const f = find(r, id);
+        if (!f) return [];
+        return f.evidence.flatMap((e) => {
+          const m = e.match(BLOCKER_LINE);
+          if (!m) return [];
+          const [, label, desc] = m;
+          const out: string[] = [];
+          // 2026-10-13: Reddit's title said "a block page" while its evidence said "other: ...".
+          if (label === "other" || label === "modal") out.push(`evidence is labelled "${label}" (the agent's raw label) under "${f.title}"`);
+          else if (!f.title.includes(label)) out.push(`evidence says "${label}", but the title "${f.title}" does not`);
+          // 2026-10-13: tinyfish.ai's "modal: A banner about Search and Fetch APIs" was called a pop-up.
+          if ((label === "modal" || label === "pop-up") && /\bbanners?\b/i.test(desc) && !/pop-?ups?|modals?|overlays?|dialogs?/i.test(desc))
+            out.push(`the agent describes a banner, but it is labelled "${label}"`);
+          return out;
+        });
+      }),
+  },
+  {
+    id: "visible-counts",
+    says: "A word count or share the summary calls visible or shown matches the page's visible text, not the rendered page with its hidden text.",
+    check: (r) => {
+      const br = r.stages.browser;
+      const inner = br?.renderedInnerTextWords ?? 0;
+      if (!br?.ok || !br.raw || !br.rendered || br.challenge || inner <= 0 || inner > br.rendered.words) return [];
+      const text = r.connection.join("\n");
+      const share = Math.round((br.raw.words / inner) * 100);
+      return [
+        // 2026-10-13: Medium's summary said "a browser shows 315"; 163 words were visible.
+        ...[...text.matchAll(/a browser (?:shows|sees) (\d+)/g)].filter((m) => Math.abs(Number(m[1]) - inner) > 0.2 * inner).map((m) => `"a browser shows ${m[1]}", but ${inner} words were visible`),
+        ...[...text.matchAll(/(\d+) of them visible/g)].filter((m) => Number(m[1]) !== inner).map((m) => `"${m[1]} of them visible", but ${inner} words were visible`),
+        // 2026-10-13: Wikipedia's "98% of the visible text" was 98% of the rendered text; against the visible text it is 110%.
+        ...[...text.matchAll(/carries (\d+)% of the visible text/g)]
+          .filter((m) => Math.abs(Number(m[1]) - share) > 5)
+          .map((m) => `"${m[1]}% of the visible text", but the server HTML has ${share}% as many words as the visible text`),
+      ];
+    },
+  },
+  {
+    id: "strength-vs-paraphrase",
+    says: "The strengths never say where the agent found its answer when the summary says its quote was paraphrased.",
+    check: (r) =>
+      // 2026-10-13: Medium's strength said "from content visible on load" next to a paraphrased quote.
+      r.connection.some((l) => l.includes("paraphrased rather than copied")) && r.strengths.some((x) => x.includes("from content visible on load"))
+        ? ["a strength says the answer is visible on load, but the summary says the agent's quote was paraphrased"]
+        : [],
   },
   {
     id: "answered-vs-blockers",
@@ -143,7 +196,8 @@ export const RULES: Rule[] = [
     id: "same-page-wording",
     says: "\"Essentially the same page\" is only said when the server HTML has 90% or more of the text.",
     check: (r) =>
-      [...r.connection.join("\n").matchAll(/carries (\d+)% of the visible text, so crawlers that skip JavaScript see essentially the same page/g)]
+      // "visible" in reports saved before 2026-10-13, "rendered" since.
+      [...r.connection.join("\n").matchAll(/carries (\d+)% of the (?:visible|rendered) text, so crawlers that skip JavaScript see essentially the same page/g)]
         .filter((m) => Number(m[1]) < 90)
         .map((m) => `${m[1]}% is called essentially the same page`),
   },

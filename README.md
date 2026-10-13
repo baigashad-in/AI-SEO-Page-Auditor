@@ -92,7 +92,7 @@ npm run check
 # --all checks every run; --rebuild analyzes the saved stage data again with the current code
 ```
 
-`npm run check` catches contradictions a single check cannot see in itself: a "Content is in the server HTML" strength next to a JavaScript finding, a summary line that states as fact what its finding marks low confidence, a section listed as dropped that Fetch's text contains, broken punctuation in a draft. Each rule comes from a false claim found in a live run; `npm run check -- --rules` lists them. It exits with code 1 when a rule is broken.
+`npm run check` catches contradictions a single check cannot see in itself: a "Content is in the server HTML" strength next to a JavaScript finding, a summary line that states as fact what its finding marks low confidence, a section listed as dropped that Fetch's text contains, a blocker the title calls a block page while its evidence says "other", a word count called visible that includes hidden text, broken punctuation in a draft. Each rule comes from a false claim found in a live run; `npm run check -- --rules` lists them. It exits with code 1 when a rule is broken.
 
 `audit` and `demo` print each stage as it starts and finishes, plus a "still running" line every 15 seconds; a page usually takes 1 to 3 minutes, mostly the Agent. The web app prints the same `[audit]` lines in the terminal where `npm run dev` runs, while the page shows progress for each stage.
 
@@ -183,7 +183,7 @@ Routes ask for up to 180 seconds (`maxDuration`); your host's plan must allow th
 ## Tests
 
 ```bash
-npm test           # 196 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
+npm test           # 214 unit tests: robots.txt matching, extraction stats, HTML facts, findings, scoring, regressions from live runs
 npm run typecheck
 npm run check      # report rules on your saved demo runs (see How to run)
 ```

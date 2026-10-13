@@ -11,6 +11,9 @@ import { displayUrl, oneLineError, pageUrlAfterRedirect } from "../lib/url";
 import type { FetchStageResult } from "../lib/types";
 import { agent, browserStage, bundle, fetchStage, LONG_TEXT, PAGE_URL, REDDIT_URL, search } from "./helpers";
 
+// A sentence from LONG_TEXT, so the agent's quote is found on the page.
+const ON_PAGE_QUOTE = "Search engine optimization is the practice of improving how pages appear in search results.";
+
 // Fetch result shaped like Reddit's r/SEO page: a title and no meta description.
 const redditFetch = (md: string, over: Partial<FetchStageResult> = {}) => fetchStage(md, over, REDDIT_URL, { title: "The SEO Authority", description: null });
 
@@ -358,7 +361,8 @@ describe("an agent that answered only after getting past a CAPTCHA (medium.com/b
   });
 
   it("keeps the strength when only a banner was in the way", () => {
-    const banner = agent({ answer_found: true, answer_location: "visible_on_load", blockers: [{ type: "modal", description: "Promo banner at the top" }] });
+    // A quote that is on the page: the strength only names where the answer is when the quote is found.
+    const banner = agent({ answer_found: true, answer_location: "visible_on_load", evidence_quote: ON_PAGE_QUOTE, blockers: [{ type: "modal", description: "Promo banner at the top" }] });
     const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: banner }), { url: PAGE_URL });
     expect(r.scores.answerability).toBe("answered");
     expect(r.strengths.join(" ")).toContain("visible on load");
@@ -449,7 +453,7 @@ describe("blockers the agent says did not get in the way (Wikipedia, 2026-10-11 
   };
 
   it("does not report or score a banner that did not block", () => {
-    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: agent({ answer_found: true, answer_location: "visible_on_load", blockers: [banner] }) }), { url: PAGE_URL });
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: agent({ answer_found: true, answer_location: "visible_on_load", evidence_quote: ON_PAGE_QUOTE, blockers: [banner] }) }), { url: PAGE_URL });
     expect(r.findings.find((x) => x.id === "answer-blockers")).toBeUndefined();
     expect(r.scores.answerability).toBe("answered");
     expect(r.strengths.join(" ")).toContain("visible on load");
@@ -525,5 +529,93 @@ describe("one blocker, one kind: wording and fix agree (tinyfish.ai, 2026-10-12 
     const { title, steps } = fixFor("A large image carousel took up the first screen");
     expect(title).toBe("The agent had to get past an obstacle");
     expect(steps).not.toContain("automated browsers are blocked");
+  });
+});
+
+describe("one blocker, one name: evidence label, title and fix agree (2026-10-13)", () => {
+  const blockerFinding = (blockers: { type: string; description: string }[], answer_found = true) => {
+    const a = agent({ answer_found, answer_summary: answer_found ? "Summary." : null, answer_location: answer_found ? "visible_on_load" : "not_on_page", blockers });
+    return buildFindings(bundle({ fetch: fetchStage(LONG_TEXT), agent: a })).find((x) => x.id === "answer-blockers" || x.id === "answer-blocked")!;
+  };
+
+  it("labels an 'other' block page as a block page in the evidence too (Reddit)", () => {
+    const f = blockerFinding([{ type: "other", description: "Network security block message prevented the page from loading, showing only a block notice." }], false);
+    expect(f.title).toContain("(a block page)");
+    expect(f.evidence[0]).toBe("block page: Network security block message prevented the page from loading, showing only a block notice.");
+  });
+
+  it("calls a 'modal' the agent describes as a banner a banner, with banner advice (tinyfish.ai)", () => {
+    const f = blockerFinding([{ type: "modal", description: "A banner about Search and Fetch APIs free on every plan covering top portion of page" }]);
+    expect(f.title).toBe("The agent had to get past a banner");
+    expect(f.evidence[0]).toBe("banner: A banner about Search and Fetch APIs free on every plan covering top portion of page (the agent called this a modal, but it describes a banner)");
+    expect(f.fix.steps.join(" ")).toContain("announcement banners");
+    expect(f.fix.steps.join(" ")).not.toContain("pop-ups");
+  });
+
+  it("keeps a 'modal' the agent calls a pop-up as a pop-up, labelled the way the title says", () => {
+    const f = blockerFinding([{ type: "modal", description: "Banner popup about Search and Fetch APIs free on every plan with dismiss button" }]);
+    expect(f.title).toBe("The agent had to get past a pop-up");
+    expect(f.evidence[0]).toBe("pop-up: Banner popup about Search and Fetch APIs free on every plan with dismiss button");
+  });
+
+  it("lists a block page the agent labelled 'modal' in the blocked finding", () => {
+    const f = blockerFinding([{ type: "modal", description: "You've been blocked by network security." }], false);
+    expect(f.id).toBe("answer-blocked");
+    expect(f.title).toContain("(a block page)");
+    expect(f.evidence[0]).toContain("block page: You've been blocked by network security.");
+  });
+});
+
+describe("rendered and visible word counts are named for what they are (2026-10-13)", () => {
+  it("says 'rendered text' for the server-HTML share, which both counts include hidden text in (Wikipedia, react.dev)", () => {
+    const page = `<html><body><p>${LONG_TEXT}</p></body></html>`;
+    const line = buildReport(bundle({ browser: browserStage(page, page, { renderedInnerTextWords: 900 }) }), { url: PAGE_URL }).connection.find((l) => l.includes("server HTML"))!;
+    expect(line).toMatch(/carries \d+% of the rendered text/);
+    expect(line).not.toContain("visible text");
+  });
+
+  it("gives the visible count next to the rendered count when much of the page is hidden (Medium)", () => {
+    const raw = `<html><body><p>${"menu ".repeat(49)}</p></body></html>`;
+    const ren = `<html><body><p>${"menu ".repeat(49)}</p><h2>Posts</h2><p>${"story ".repeat(264)}</p></body></html>`;
+    const br = browserStage(raw, ren, { renderedInnerTextWords: 163 });
+    const r = buildReport(bundle({ browser: br, search: search(1) }), { url: PAGE_URL });
+    const line = r.connection.find((l) => l.startsWith("Non-JavaScript crawlers"))!;
+    expect(line).toContain(`receive 49 words; after JavaScript the page has ${br.rendered!.words} (163 of them visible).`);
+    expect(line).not.toContain("a browser shows");
+    expect(reportToMarkdown(r)).toContain(`* Rendered page (browser): ${br.rendered!.words} words, 163 of them visible`);
+  });
+
+  it("adds no visible count when most of the rendered text is visible", () => {
+    const page = `<html><body><p>${LONG_TEXT}</p></body></html>`;
+    const r = buildReport(bundle({ browser: browserStage(page, page, { renderedInnerTextWords: 1180 }) }), { url: PAGE_URL });
+    expect(r.views.visibleWords).toBeNull();
+    expect(reportToMarkdown(r)).not.toContain("of them visible");
+  });
+});
+
+describe("what each reader sees, when a count is missing (2026-10-13)", () => {
+  it("says why instead of 'n/a words' (Browser failed on Substack, Fetch blocked on Medium)", () => {
+    const br = { ...browserStage("<p>x</p>"), ok: false, raw: null, rendered: null, renderedInnerTextWords: 0, error: "browserType.connectOverCDP: WebSocket error" };
+    const fe = { ...fetchStage(""), page: null, stats: null, pageError: { url: PAGE_URL, error: "bot_blocked" } };
+    const md = reportToMarkdown(buildReport(bundle({ fetch: fe, browser: br }), { url: PAGE_URL }));
+    expect(md).not.toContain("n/a words");
+    expect(md).toContain("* Raw server HTML (non-JavaScript crawlers): not measured (Browser stage failed)");
+    expect(md).toContain("* Rendered page (browser): not measured (Browser stage failed)");
+    expect(md).toContain("* AI fetch extraction (TinyFish Fetch): none (Fetch could not read the page: bot_blocked)");
+  });
+});
+
+describe("the agent strength only says where the answer is when the quote is on the page (Medium, 2026-10-13)", () => {
+  const strengthFor = (quote: string) =>
+    buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: agent({ evidence_quote: quote }) }), { url: PAGE_URL }).strengths.find((s) => s.startsWith("An AI agent answered"));
+
+  it("drops 'from content visible on load' for a paraphrased quote", () => {
+    expect(strengthFor("The blog is the official hub for product news and community updates.")).toBe("An AI agent answered the query.");
+  });
+
+  it("keeps it when the quote is on the page", () => {
+    expect(strengthFor(ON_PAGE_QUOTE)).toBe(
+      "An AI agent answered the query from content visible on load.",
+    );
   });
 });

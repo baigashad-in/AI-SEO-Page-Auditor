@@ -112,7 +112,12 @@ function FindingItem({ f }: { f: Finding }) {
 function Readers({ r }: { r: AuditReport }) {
   const blocked = r.views.blockedNote;
   const rows = [
-    { label: "A person in a browser", sub: "Rendered page, JavaScript on", value: r.views.renderedWords, browser: true },
+    {
+      label: "A person in a browser",
+      sub: r.views.visibleWords ? `Rendered page, JavaScript on; ${r.views.visibleWords.toLocaleString()} of these words visible` : "Rendered page, JavaScript on",
+      value: r.views.renderedWords,
+      browser: true,
+    },
     { label: "An AI fetch tool", sub: "What TinyFish Fetch extracts", value: r.views.extractedWords, browser: false },
     { label: "A crawler that skips JavaScript", sub: "GPTBot, ClaudeBot, PerplexityBot", value: r.views.rawWords, browser: true },
   ];
@@ -134,7 +139,11 @@ function Readers({ r }: { r: AuditReport }) {
                 {row.value !== null && <span style={{ width: `${w}%` }} />}
               </div>
               <div className="bar-num">
-                {row.value === null ? <small>{blocked && row.browser ? "bot challenge" : "not measured"}</small> : row.value.toLocaleString()}{" "}
+                {row.value === null ? (
+                  <small>{blocked && row.browser ? "bot challenge" : !row.browser && r.stages.fetch?.pageError ? "could not read the page" : "not measured"}</small>
+                ) : (
+                  row.value.toLocaleString()
+                )}{" "}
                 {row.value !== null && <small>words</small>}
               </div>
             </dd>

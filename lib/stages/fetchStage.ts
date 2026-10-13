@@ -253,8 +253,10 @@ export async function runFetchStage(input: AuditInput): Promise<FetchStageResult
       }
     }
   } else if (smUrl) {
-    // A sitemap exists (declared in robots.txt) but could not be read: say so instead of claiming there is none.
-    result.sitemap = { checkedUrl: smUrl, containsUrl: null, note: `Sitemap declared in robots.txt (${smUrl}) but Fetch could not read it (${smError || "no content"}). Not checked.` };
+    // A sitemap exists but could not be read: say so instead of claiming there is none. Only say
+    // "declared in robots.txt" when it was: Reddit's came from the /sitemap.xml guess (2026-10-13).
+    const where = declared.some((d) => normalizeUrl(d) === normalizeUrl(smUrl!)) ? "Sitemap declared in robots.txt" : "Sitemap at /sitemap.xml";
+    result.sitemap = { checkedUrl: smUrl, containsUrl: null, note: `${where} (${smUrl}) but Fetch could not read it (${smError || "no content"}). Not checked.` };
   } else {
     const guessErr = errFor(sitemapGuess);
     if (guessErr && guessErr.error !== "page_not_found") {

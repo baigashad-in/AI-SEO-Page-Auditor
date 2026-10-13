@@ -21,6 +21,18 @@ describe("reports built by the current code", () => {
     for (const r of reports) expect(checkReport(r)).toEqual([]);
   });
 
+  it("break no rule on the 2026-10-13 run's cases: an 'other' block page, a 'modal' banner, hidden text, a paraphrased quote", () => {
+    const raw = `<html><body><p>${"menu ".repeat(49)}</p></body></html>`;
+    const ren = `<html><body><p>${"menu ".repeat(49)}</p><h2>Posts</h2><p>${"story ".repeat(264)}</p></body></html>`;
+    const reports = [
+      buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: agent({ answer_found: false, answer_summary: null, answer_location: "not_on_page", blockers: [{ type: "other", description: "Network security block message prevented the page from loading." }] }) }), { url: PAGE_URL }),
+      buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: agent({ blockers: [{ type: "modal", description: "A banner about Search and Fetch APIs free on every plan covering top portion of page" }] }) }), { url: PAGE_URL }),
+      buildReport(bundle({ browser: browserStage(raw, ren, { renderedInnerTextWords: 163 }), search: search(1) }), { url: PAGE_URL }),
+      buildReport(bundle({ fetch: fetchStage(LONG_TEXT), agent: agent({ evidence_quote: "The blog is the official hub for product news and community updates." }) }), { url: PAGE_URL }),
+    ];
+    for (const r of reports) expect(checkReport(r)).toEqual([]);
+  });
+
   it("gives every rule an id and a one-sentence promise", () => {
     expect(new Set(RULES.map((r) => r.id)).size).toBe(RULES.length);
     for (const r of RULES) expect(r.says).toMatch(/^[A-Z"].+\.$/);
@@ -116,5 +128,59 @@ describe("false claims from live runs break their rule", () => {
     const found = checkReport(r).filter((v) => v.rule === "do-today").map((v) => v.message);
     expect(found.join(" ")).toContain("not sorted by severity");
     expect(found.join(" ")).toContain('"no-such-finding"');
+  });
+
+  it("a blocker titled 'a block page' with evidence labelled 'other' (Reddit, 2026-10-13 02:10)", () => {
+    const r = clean();
+    r.findings.unshift({
+      id: "answer-blocked",
+      category: "answerability",
+      severity: "high",
+      confidence: "medium",
+      title: "An AI browsing agent was blocked before it could read the page (a block page)",
+      evidence: ["other: Network security block message prevented the page from loading."],
+      visibilityImpact: "",
+      fix: { summary: "", steps: ["Check why automated browsers are blocked (bot manager, WAF rule, rate limit)."], effort: "hours" },
+      sources: ["agent"],
+    });
+    expect(rulesBroken(r)).toContain("blocker-label-matches-title");
+  });
+
+  it("a banner the agent labelled 'modal' and the report called a pop-up (tinyfish.ai, 2026-10-13 02:11)", () => {
+    const r = clean();
+    r.findings.push({
+      id: "answer-blockers",
+      category: "answerability",
+      severity: "low",
+      confidence: "medium",
+      title: "The agent had to get past a pop-up",
+      evidence: ["pop-up: A banner about Search and Fetch APIs free on every plan covering top portion of page"],
+      visibilityImpact: "",
+      fix: { summary: "", steps: ["Delay newsletter or promo pop-ups, or remove them on content pages."], effort: "hours" },
+      sources: ["agent"],
+    });
+    const found = checkReport(r).filter((v) => v.rule === "blocker-label-matches-title");
+    expect(found.map((v) => v.message).join(" ")).toContain("describes a banner");
+  });
+
+  it("'a browser shows' the rendered count while far fewer words were visible (Medium, 2026-10-13 02:07)", () => {
+    const r = clean();
+    r.stages.browser!.renderedInnerTextWords = Math.round(r.stages.browser!.rendered!.words / 2);
+    r.connection.push(`Non-JavaScript crawlers (GPTBot, ClaudeBot, PerplexityBot) receive 49 words; a browser shows ${r.stages.browser!.rendered!.words}.`);
+    expect(rulesBroken(r)).toContain("visible-counts");
+  });
+
+  it("'98% of the visible text' when the server HTML has more words than the visible text (Wikipedia, 2026-10-13 02:04)", () => {
+    const r = clean();
+    r.stages.browser!.renderedInnerTextWords = Math.round(r.stages.browser!.raw!.words / 1.1);
+    r.connection.push("The server HTML already carries 98% of the visible text, so crawlers that skip JavaScript see essentially the same page as users.");
+    expect(rulesBroken(r)).toContain("visible-counts");
+  });
+
+  it("a visible-on-load strength next to a paraphrased quote (Medium, 2026-10-13 02:07)", () => {
+    const r = clean();
+    r.connection.push('An AI browsing agent answered "medium blog" (visible on load). Its quote was paraphrased rather than copied from the page, so which crawlers receive that text could not be checked.');
+    r.strengths.push("An AI agent answered the query from content visible on load.");
+    expect(rulesBroken(r)).toContain("strength-vs-paraphrase");
   });
 });

@@ -600,6 +600,18 @@ export function visibleWords(b: StageBundle): number | null {
 }
 
 /**
+ * Visible words when much of the rendered page is hidden (under 80% visible), else null. The rendered
+ * count includes hidden text: Medium's blog builds each post list twice, 315 words rendered and 163
+ * visible (2026-10-13), so "a browser shows 315" overstated what a reader sees.
+ */
+export function mostlyHiddenVisibleWords(b: StageBundle): number | null {
+  const br = b.browser;
+  if (!br?.ok || !br.rendered || br.challenge) return null;
+  const v = br.renderedInnerTextWords;
+  return v > 0 && v < 0.8 * br.rendered.words ? v : null;
+}
+
+/**
  * Fetch's markdown can glue a heading to the line after it ("Medium Day 2026TK, AI, and...",
  * "a private writing revivalMost writers..."), so a lowercase letter or digit followed by a capital
  * counts as a word break. Applied to both sides of a comparison, so "TinyFish" still matches itself.
@@ -1493,6 +1505,9 @@ export function blockerType(x: { type: string; description: string }): string {
  */
 export function blockerKind(x: { type: string; description: string }): string {
   const t = blockerType(x);
+  // A "modal" the agent itself describes as a banner, and not as a pop-up, is a banner (tinyfish.ai,
+  // 2026-10-13: "modal: A banner about Search and Fetch APIs free on every plan" was called a pop-up).
+  if (t === "modal" && BANNER_NOUN.test(x.description) && !POPUP_NOUN.test(x.description)) return "banner";
   if (t !== "other") return t;
   if (ACCESS_BLOCK.test(x.description)) return "block_page";
   return BANNER_TEXT.test(x.description) ? "banner" : "other";
@@ -1502,13 +1517,24 @@ export function blockerPhrase(x: { type: string; description: string }): string 
   return BLOCKER_PHRASE[blockerKind(x)] || "an obstacle";
 }
 
-/** One evidence line per blocker, saying so when the agent's label was overridden. */
+/**
+ * One evidence line per blocker, labelled with the kind the title and fix use, so the three always
+ * name the same thing (Reddit, 2026-10-13: title "a block page", evidence "other: ..."). Says so when
+ * the agent's own label was overridden.
+ */
 function blockerEvidence(x: { type: string; description: string }): string {
-  const label = x.type.replace(/_/g, " ");
+  const kind = blockerKind(x);
+  const phrase = BLOCKER_PHRASE[kind];
+  // A type outside the agent's schema keeps its own name; the title calls it "an obstacle".
+  if (!phrase) return `${x.type.replace(/_/g, " ")}: ${x.description}`;
+  const label = phrase.replace(/^an? /, "");
   // "other" is no label at all, so there is nothing to override.
-  if (blockerType(x) === x.type || x.type === "other") return `${label}: ${x.description}`;
-  const article = /^[aeiou]/i.test(label) ? "an" : "a";
-  return `${label}: ${x.description} (the agent called this ${article} ${label}, but it describes a bot block, so the fix is for the block)`;
+  if (x.type === kind || x.type === "other") return `${label}: ${x.description}`;
+  const agentLabel = x.type.replace(/_/g, " ");
+  const article = /^[aeiou]/i.test(agentLabel) ? "an" : "a";
+  return kind === "block_page"
+    ? `${label}: ${x.description} (the agent called this ${article} ${agentLabel}, but it describes a bot block, so the fix is for the block)`
+    : `${label}: ${x.description} (the agent called this ${article} ${agentLabel}, but it describes ${phrase})`;
 }
 
 function blockerFix(x: { type: string; description: string }): string {
@@ -1520,6 +1546,9 @@ function blockerFix(x: { type: string; description: string }): string {
 const ACCESS_BLOCK =
   /\bblock(?:ed|s|ing)?\b|\bdenied\b|\bforbidden\b|captcha|\bchallenge\b|security (?:check|verification|screen)|\bverify\b|prove (?:you|your)|\bnot a (?:bot|robot)\b|\b403\b/i;
 const BANNER_TEXT = /\b(?:banner|notice|announcement|promo(?:tional)?|newsletter|pop-?up|overlay|toast)\b/i;
+// For a "modal": the description names a banner or bar, and nothing that pops up over the page.
+const BANNER_NOUN = /\b(?:banners?|announcement bar|notification bar|top bar|notice bar)\b/i;
+const POPUP_NOUN = /\b(?:pop-?ups?|modals?|dialogs?|overlays?|lightbox|interstitial)\b/i;
 
 // Agents also list things that did not get in the way: "A promotional banner about Wiki Loves
 // Monuments 2026 appeared at the top of the page but did not block the main content" (Wikipedia,
@@ -1608,7 +1637,8 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
 
   if (!a.answer_found && blocked) {
     // The agent never saw the content: "add this information" advice would be wrong.
-    const blockers = obstacles(a).filter((x) => x.type !== "cookie_wall" && x.type !== "modal");
+    // By kind, like the title and fix: a block page the agent labelled "modal" still counts.
+    const blockers = obstacles(a).filter((x) => !["cookie_wall", "modal", "banner"].includes(blockerKind(x)));
     out.push({
       id: "answer-blocked",
       category: "answerability",
@@ -1956,6 +1986,9 @@ export function buildStrengths(input: StageBundle): string[] {
   if (f?.stats && f.stats.words >= 600 && f.stats.headings.length >= 3) s.push(`Extraction is substantial and structured: ${f.stats.words} words under ${f.stats.headings.length} headings.`);
   if (br?.rendered && br.rendered.jsonLd.blocks > 0 && br.rendered.jsonLd.parseErrors === 0) s.push(`Valid structured data: ${br.rendered.jsonLd.types.join(", ") || "JSON-LD present"}.`);
   if (b.search?.target.position && b.search.target.position <= 3) s.push(`Ranks #${b.search.target.position} for "${b.search.query}".`);
-  if (b.agent?.answer?.answer_found && b.agent.answer.answer_location === "visible_on_load" && !answeredOnOtherPage(b.agent.answer) && !seriousBlockers(b.agent.answer).length) s.push("An AI agent answered the query from content visible on load.");
+  if (b.agent?.answer?.answer_found && b.agent.answer.answer_location === "visible_on_load" && !answeredOnOtherPage(b.agent.answer) && !seriousBlockers(b.agent.answer).length)
+    // Where the answer sits is only claimed when the agent's quote is on the page; a paraphrased quote
+    // (Medium, 2026-10-13) leaves that to the agent's word, which the summary already flags.
+    s.push(locateQuote(input).verified ? "An AI agent answered the query from content visible on load." : "An AI agent answered the query.");
   return s;
 }
