@@ -5,6 +5,7 @@
 import { loadEnv } from "./env";
 import { runFullAudit } from "../lib/orchestrate";
 import { saveReport } from "./save";
+import { readabilityText } from "../lib/analyze/scoreNotes";
 
 loadEnv();
 
@@ -32,7 +33,7 @@ async function main() {
   );
   const saved = saveReport(out, report);
 
-  console.log(`\nReadability ${report.scores.readability}/100, visibility ${report.scores.visibility ?? "n/a"}/100, answer test: ${report.scores.answerability}`);
+  console.log(`\nReadability ${readabilityText(report.scores)}, visibility ${report.scores.visibility ?? "n/a"}/100, answer test: ${report.scores.answerability}`);
   for (const line of report.connection) console.log(`* ${line}`);
   console.log("\nDo today:");
   report.doToday.forEach((id, i) => {

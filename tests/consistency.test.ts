@@ -198,4 +198,28 @@ describe("false claims from live runs break their rule", () => {
     r.strengths.push("An AI agent answered the query from content visible on load.");
     expect(rulesBroken(r)).toContain("strength-vs-paraphrase");
   });
+
+  it("a paraphrased quote when the browser never read the page (Medium, 2026-10-14 12:31)", () => {
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), search: search(2) }), { url: PAGE_URL });
+    r.connection.push('An AI browsing agent answered "medium blog" (visible on load). Its quote was paraphrased rather than copied from the page, so which crawlers receive that text could not be checked.');
+    expect(rulesBroken(r)).toContain("paraphrase-needs-page-text");
+    const read = clean();
+    read.connection.push('An AI browsing agent answered "medium blog" (visible on load). Its quote was paraphrased rather than copied from the page, so which crawlers receive that text could not be checked.');
+    expect(rulesBroken(read)).not.toContain("paraphrase-needs-page-text");
+  });
+
+  it("an answer 'crawlers never receive' when Fetch and the browser read nothing (mock run, 2026-10-14)", () => {
+    const r = buildReport(bundle({ search: search(2) }), { url: PAGE_URL });
+    r.connection.push('An AI browsing agent answered "acme pricing" only after interacting with the page (Clicked a tab); that text is not in what fetch tools or non-JavaScript crawlers receive.');
+    r.findings.push({ ...r.findings[0], id: "answer-hidden", title: "The answer appears only after a click, and crawlers never receive it" });
+    const broken = checkReport(r).filter((v) => v.rule === "quote-claims-need-page-text");
+    expect(broken.length).toBe(4);
+  });
+
+  it("a visible-on-load strength next to a quote that could not be checked (2026-10-14 wording)", () => {
+    const r = clean();
+    r.connection.push('An AI browsing agent answered "medium blog" (visible on load). Neither Fetch nor the browser could read the page, so its quote could not be checked against the page text or against what crawlers receive.');
+    r.strengths.push("An AI agent answered the query from content visible on load.");
+    expect(rulesBroken(r)).toContain("strength-vs-paraphrase");
+  });
 });

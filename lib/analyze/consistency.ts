@@ -128,9 +128,45 @@ export const RULES: Rule[] = [
     says: "The strengths never say where the agent found its answer when the summary says its quote was paraphrased.",
     check: (r) =>
       // 2026-10-13: Medium's strength said "from content visible on load" next to a paraphrased quote.
-      r.connection.some((l) => l.includes("paraphrased rather than copied")) && r.strengths.some((x) => x.includes("from content visible on load"))
-        ? ["a strength says the answer is visible on load, but the summary says the agent's quote was paraphrased"]
+      // "may be paraphrased" and "its quote could not be checked" (2026-10-14) are unchecked quotes too.
+      r.connection.some((l) => /paraphrased|its quote could not be checked/.test(l)) && r.strengths.some((x) => x.includes("from content visible on load"))
+        ? ["a strength says the answer is visible on load, but the summary says the agent's quote could not be found on the page"]
         : [],
+  },
+  {
+    id: "paraphrase-needs-page-text",
+    says: "The summary only says the agent's quote was paraphrased when the browser read the page to compare it with.",
+    check: (r) => {
+      // 2026-10-14: Medium's Fetch was blocked and its Browser stage failed, so there was no page text,
+      // yet the summary said the quote "was paraphrased rather than copied from the page".
+      if (!r.connection.some((l) => l.includes("paraphrased rather than copied"))) return [];
+      const br = r.stages.browser;
+      const read = !!br?.ok && !br.challenge && (br.raw?.text != null || br.rendered?.text != null);
+      return read ? [] : ["the summary says the agent's quote was paraphrased, but the browser did not read the page, so nothing was compared"];
+    },
+  },
+  {
+    id: "quote-claims-need-page-text",
+    says: "A claim that the agent's answer is not in some page text names only texts the audit read.",
+    check: (r) => {
+      // 2026-10-14 mock run with Fetch and Browser failing: "that text is not in what fetch tools or
+      // non-JavaScript crawlers receive", and a finding saying crawlers never receive the answer.
+      const br = r.stages.browser;
+      const fetchRead = !!r.stages.fetch?.page;
+      const rawRead = !!br?.ok && !br.challenge && br.raw != null;
+      const out: string[] = [];
+      const agentLine = r.connection.find((l) => l.startsWith("An AI browsing agent")) ?? "";
+      const notIn = agentLine.match(/that text is not in what (.*) receive\./)?.[1] ?? "";
+      if (notIn.includes("fetch tools") && !fetchRead) out.push("the summary says fetch tools do not receive the answer, but Fetch did not read the page");
+      if (notIn.includes("non-JavaScript crawlers") && !rawRead) out.push("the summary says non-JavaScript crawlers do not receive the answer, but the browser did not read the server HTML");
+      if (agentLine.includes("This page itself does not contain it") && !fetchRead && !rawRead) out.push("the summary says this page does not contain the answer, but no page text was read");
+      const hidden = find(r, "answer-hidden");
+      if (hidden && !fetchRead && !rawRead) out.push(`"${hidden.title}" was reported, but no page text was read to compare the answer with`);
+      if (hidden?.title.includes("crawlers never receive it") && !rawRead) out.push(`"${hidden.title}", but the browser did not read the server HTML that crawlers receive`);
+      if (find(r, "answer-other-page")?.evidence.some((e) => e.startsWith("The quote is not in this page's")) && !fetchRead && !rawRead)
+        out.push("a finding says the quote is not on this page, but no page text was read");
+      return out;
+    },
   },
   {
     id: "challenge-vs-agent",

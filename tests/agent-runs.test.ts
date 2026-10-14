@@ -23,7 +23,7 @@ vi.mock("../lib/tinyfish", async (orig) => {
 });
 
 import { mergeAgentRuns } from "../lib/analyze/agentRuns";
-import { agentAgreementNote, chooseAgentRun, reportBundle } from "../lib/analyze/findings";
+import { agentAgreement, agentAgreementNote, agentRunsShort, chooseAgentRun, reportBundle } from "../lib/analyze/findings";
 import { buildReport } from "../lib/analyze/report";
 import { checkReport } from "../lib/analyze/consistency";
 import { agentProxy, agentRunCount, runAgentStage } from "../lib/stages/agentStage";
@@ -121,6 +121,28 @@ describe("the report with several runs", () => {
     const again = buildReport(reportBundle(r), { url: PAGE_URL });
     expect(again.scores).toEqual(r.scores);
     expect(chooseAgentRun(reportBundle(r)).agent!.runId).toBe(r.stages.agent!.runId);
+  });
+});
+
+describe("the run count in the demo index (v28 run, 2026-10-14)", () => {
+  const short = (...answers: (AgentAnswer | null)[]) => agentRunsShort(reportBundle(report(runs(...answers))));
+
+  it("tells a run that did not finish (Medium) apart from a run that got another result (tinyfish.ai)", () => {
+    expect(short(answered(), answered(), null)).toBe("2/3 runs; 1 did not finish");
+    expect(short(answered(), answered(), captcha())).toBe("2/3 runs; 1 differed");
+    expect(short(answered(), captcha(), null)).toBe("1/3 runs; 1 did not finish; 1 differed");
+    expect(short(answered(), answered(), answered())).toBe("3/3 runs");
+  });
+
+  it("gives no count when no run finished, instead of 'no result (3/3 runs)'", () => {
+    const b = reportBundle(report(runs(null, null, null)));
+    expect(agentAgreement(b)).toBeNull();
+    expect(agentRunsShort(b)).toBeNull();
+    expect(agentAgreementNote(b)).toBeNull();
+  });
+
+  it("gives no count for a single run", () => {
+    expect(short(answered())).toBeNull();
   });
 });
 

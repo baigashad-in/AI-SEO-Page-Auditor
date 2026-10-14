@@ -5,6 +5,7 @@ import { answeredOnOtherPage, buildFindings, pageCasing, plainDashes, snippetDra
 import { AGENT_OUTPUT_SCHEMA, agentGoal } from "../lib/stages/agentStage";
 import { buildReport, domainList } from "../lib/analyze/report";
 import { reportToMarkdown } from "../lib/analyze/markdownReport";
+import { checkReport } from "../lib/analyze/consistency";
 import { quoteAppearsIn } from "../lib/analyze/text";
 import { robotsVerdicts } from "../lib/parse/robots";
 import { displayUrl, oneLineError, pageUrlAfterRedirect } from "../lib/url";
@@ -660,5 +661,104 @@ describe("the summary agrees with the agent and the crawler probes (2026-10-13, 
     const page = `<html><body><p>${LONG_TEXT}</p></body></html>`;
     const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), browser: browserStage(page), agent: agent({ evidence_quote: ON_PAGE_QUOTE }) }), { url: PAGE_URL });
     expect(r.connection.join(" ")).toContain("the same answer is in what fetch tools and non-JavaScript crawlers receive.");
+  });
+});
+
+describe("the summary only calls the agent's quote paraphrased when there was page text to compare (Medium, 2026-10-14)", () => {
+  const PARAPHRASE = "The blog is the official hub for product news and community updates.";
+  const failedBrowser = () => ({ ...browserStage("<p>x</p>"), ok: false, raw: null, rendered: null, renderedInnerTextWords: 0, error: "browserType.connectOverCDP: WebSocket error" });
+  const blockedFetch = () => ({ ...fetchStage(""), page: null, stats: null, pageError: { url: PAGE_URL, error: "bot_blocked" } });
+  const lineFor = (b: Parameters<typeof bundle>[0]) =>
+    buildReport(bundle({ ...b, agent: agent({ evidence_quote: PARAPHRASE }) }), { url: PAGE_URL }).connection.find((l) => l.startsWith("An AI browsing agent answered"))!;
+
+  it("says the quote could not be checked when neither Fetch nor the browser read the page (Medium)", () => {
+    const line = lineFor({ fetch: blockedFetch(), browser: failedBrowser() });
+    expect(line).toContain("Neither Fetch nor the browser could read the page, so its quote could not be checked against the page text or against what crawlers receive.");
+    expect(line).not.toContain("paraphrased");
+  });
+
+  it("says the quote may be paraphrased when only Fetch read the page (Reddit, bot challenge in the browser)", () => {
+    const challenged = { ...browserStage("<p>Prove your humanity</p>"), challenge: { title: "Reddit - Prove your humanity", words: 39 } };
+    expect(lineFor({ fetch: fetchStage(LONG_TEXT), browser: challenged })).toContain(
+      "Its quote is not in the text Fetch extracted, and the browser got a bot challenge page, so the quote may be paraphrased or come from page text Fetch did not keep; which crawlers receive it could not be checked.",
+    );
+    expect(lineFor({ fetch: fetchStage(LONG_TEXT), browser: failedBrowser() })).toContain("and the Browser stage failed, so the quote may be paraphrased");
+    expect(lineFor({ fetch: fetchStage(LONG_TEXT) })).toContain("and the Browser stage did not run, so the quote may be paraphrased");
+  });
+
+  it("keeps 'paraphrased' when the browser read the page and the quote is not on it", () => {
+    const page = `<html><body><p>${LONG_TEXT}</p></body></html>`;
+    expect(lineFor({ fetch: blockedFetch(), browser: browserStage(page) })).toContain("Its quote was paraphrased rather than copied from the page");
+    expect(lineFor({ fetch: fetchStage(LONG_TEXT), browser: browserStage(page) })).toContain("Its quote was paraphrased rather than copied from the page");
+  });
+});
+
+describe("readability when nothing could be measured (mock run with every stage failing, 2026-10-14)", () => {
+  const failedBrowser = () => ({ ...browserStage("<p>x</p>"), ok: false, raw: null, rendered: null, renderedInnerTextWords: 0, error: "browserType.connectOverCDP: WebSocket error" });
+  const failedFetchCall = () => ({ ...fetchStage(""), page: null, stats: null, pageError: null, error: "fetch 402: out of credits" });
+
+  it("says 'not measured' instead of 100/100 when the Fetch call and the Browser both failed", () => {
+    const r = buildReport(bundle({ fetch: failedFetchCall(), browser: failedBrowser() }), { url: PAGE_URL });
+    expect(r.scores.readabilityParts).toEqual([]);
+    expect(r.scores.quadrant).toBe("unknown");
+    expect(reportToMarkdown(r)).toContain("* AI readability: **not measured** (Fetch and Browser did not run)");
+    expect(r.connection[0]).toBe('Neither AI readability nor search visibility could be measured in this run; "Some checks did not run" says why.');
+  });
+
+  it("does not call the page unreadable when only Search worked", () => {
+    const r = buildReport(bundle({ fetch: failedFetchCall(), browser: failedBrowser(), search: search(2) }), { url: PAGE_URL });
+    expect(r.scores.quadrant).toBe("unknown");
+    expect(r.connection[0]).toBe(`AI readability could not be measured in this run (Fetch and the browser did not read the page), so it cannot be compared with search visibility (${r.scores.visibility}/100).`);
+    expect(r.connection.join(" ")).not.toContain("Neither readable nor visible");
+  });
+
+  it("still scores crawler access from Fetch when only the Browser failed", () => {
+    const r = buildReport(bundle({ fetch: fetchStage(LONG_TEXT), browser: failedBrowser() }), { url: PAGE_URL });
+    expect(r.scores.readabilityParts.map((p) => p.label)).toContain("Crawler access");
+    expect(reportToMarkdown(r)).toContain(`* AI readability: **${r.scores.readability}/100** (partial: Browser did not run)`);
+  });
+});
+
+describe("claims about where the agent's answer is name only page texts the audit read (mock run, 2026-10-14)", () => {
+  const CLICKED = "Refunds are possible within 30 days of purchase.";
+  const failedBrowser = () => ({ ...browserStage("<p>x</p>"), ok: false, raw: null, rendered: null, renderedInnerTextWords: 0, error: "browserType.connectOverCDP: WebSocket error" });
+  const blockedFetch = () => ({ ...fetchStage(""), page: null, stats: null, pageError: { url: PAGE_URL, error: "bot_blocked" } });
+  const challenged = () => ({ ...browserStage("<p>Prove your humanity</p>"), challenge: { title: "Prove your humanity", words: 39 } });
+  const afterClick = agent({ evidence_quote: CLICKED, answer_location: "after_interaction", interactions_needed: ["Clicked the Refund policy tab"] });
+  const build = (b: Parameters<typeof bundle>[0]) => buildReport(bundle({ ...b, agent: afterClick }), { url: PAGE_URL });
+  const agentLine = (r: ReturnType<typeof build>) => r.connection.find((l) => l.startsWith("An AI browsing agent"))!;
+
+  it("reports no 'crawlers never receive it' finding when neither Fetch nor the browser read the page", () => {
+    const r = build({ fetch: blockedFetch(), browser: failedBrowser() });
+    expect(r.findings.find((x) => x.id === "answer-hidden")).toBeUndefined();
+    expect(agentLine(r)).toContain("Fetch and the browser could not read the page, so whether crawlers receive that text could not be checked.");
+    expect(checkReport(r)).toEqual([]);
+  });
+
+  it("says only fetch tools miss the answer when only Fetch read the page (browser challenged)", () => {
+    const r = build({ fetch: fetchStage(LONG_TEXT), browser: challenged() });
+    const hidden = r.findings.find((x) => x.id === "answer-hidden")!;
+    expect(hidden.title).toBe("The answer appears only after a click, and AI fetch tools do not receive it");
+    expect(hidden.evidence).toContain("The text is not in the TinyFish Fetch extraction (the only page text the audit could read). That is expected for content loaded on click; if the agent paraphrased, this can be a false alarm.");
+    expect(agentLine(r)).toContain("that text is not in what fetch tools receive.");
+    expect(checkReport(r)).toEqual([]);
+  });
+
+  it("keeps the full claim when Fetch and the browser both read the page", () => {
+    const page = `<html><body><p>${LONG_TEXT}</p></body></html>`;
+    const r = build({ fetch: fetchStage(LONG_TEXT), browser: browserStage(page) });
+    const hidden = r.findings.find((x) => x.id === "answer-hidden")!;
+    expect(hidden.title).toBe("The answer appears only after a click, and crawlers never receive it");
+    expect(hidden.evidence).toContain("The text is not in the TinyFish Fetch extraction, the raw server HTML or the page as first loaded. That is expected for content loaded on click; if the agent paraphrased, this can be a false alarm.");
+    expect(agentLine(r)).toContain("that text is not in what fetch tools or non-JavaScript crawlers receive.");
+  });
+
+  it("does not say this page lacks an answer the agent found elsewhere when no page text was read", () => {
+    const elsewhere = agent({ evidence_quote: CLICKED, answer_location: "other_page", interactions_needed: ["Navigated to the pricing page"] });
+    const r = buildReport(bundle({ fetch: blockedFetch(), browser: failedBrowser(), agent: elsewhere }), { url: PAGE_URL });
+    expect(agentLine(r)).toContain("Fetch and the browser could not read this page, so whether it also holds the answer could not be checked.");
+    expect(agentLine(r)).not.toContain("This page itself does not contain it");
+    expect(r.findings.find((x) => x.id === "answer-other-page")!.evidence).toContain("Fetch and the browser could not read this page, so the quote could not be checked against it.");
+    expect(checkReport(r)).toEqual([]);
   });
 });

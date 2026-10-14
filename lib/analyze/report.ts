@@ -2,7 +2,7 @@
 // connection, findings, and the "do today" list.
 
 import type { AuditReport, CallLog, Scores } from "../types";
-import { agentRunsLine, agentWasBlocked, answerabilityOf, answeredOnOtherPage, chooseAgentRun, blockerPhrase, browserRenderIncomplete, buildFindings, buildStrengths, isShortQuote, locateQuote, missingStages, mostlyHiddenVisibleWords, obstacles, seriousBlockers, snapshotIncomplete, usableStages, type StageBundle } from "./findings";
+import { agentRunsLine, agentWasBlocked, answerabilityOf, answeredOnOtherPage, chooseAgentRun, blockerPhrase, browserRenderIncomplete, buildFindings, comparedTexts, buildStrengths, isShortQuote, locateQuote, missingStages, mostlyHiddenVisibleWords, obstacles, seriousBlockers, snapshotIncomplete, usableStages, type StageBundle } from "./findings";
 import { markdownToPlain } from "../parse/markdown";
 import { andList, truncate } from "./text";
 import { bareHost, displayUrl } from "../url";
@@ -22,7 +22,9 @@ export function computeScores(input: StageBundle): Scores {
   const parts: { label: string; score: number; max: number }[] = [];
 
   // 1. Crawler access (30)
-  if (f || br || input.browser?.challenge) {
+  // A failed Browser stage holds no page data, so it is not evidence of access: with the Fetch call
+  // also failing, crawler access scored 30 of 30 and readability 100 from nothing (2026-10-14).
+  if (f || br?.raw || input.browser?.challenge) {
     let a = 30;
     if (f?.pageError) a -= 30;
     if (input.browser?.challenge) a -= 10; // AI browsing agents meet the same challenge
@@ -101,7 +103,7 @@ export function computeScores(input: StageBundle): Scores {
 
   const ranks = s?.target.position != null;
   const quadrant: Scores["quadrant"] =
-    visibility === null ? "unknown" : readability >= 60 ? (ranks ? "readable_visible" : "readable_invisible") : ranks ? "unreadable_visible" : "unreadable_invisible";
+    visibility === null || !parts.length ? "unknown" : readability >= 60 ? (ranks ? "readable_visible" : "readable_invisible") : ranks ? "unreadable_visible" : "unreadable_invisible";
 
   return { readability, visibility, answerability, quadrant, readabilityParts: parts, visibilityParts: vparts, missingStages: missingStages(input) };
 }
@@ -161,7 +163,13 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
       lines.push(`Readable (${rd}) and visible${pos ? ` (#${pos})` : ""} for "${q}". The job now is to stay quotable: keep the answer early, specific and in the server HTML.`);
       break;
     default:
-      lines.push(`AI readability: ${scores.readability}/100${partial ? " (partial score)" : ""}. Search visibility was not measured in this run.`);
+      if (!scores.readabilityParts.length)
+        lines.push(
+          scores.visibility === null
+            ? "Neither AI readability nor search visibility could be measured in this run; \"Some checks did not run\" says why."
+            : `AI readability could not be measured in this run (Fetch and the browser did not read the page), so it cannot be compared with search visibility (${scores.visibility}/100).`,
+        );
+      else lines.push(`AI readability: ${scores.readability}/100${partial ? " (partial score)" : ""}. Search visibility was not measured in this run.`);
   }
   const other = pos === null ? s?.domain.urls[0] : undefined;
   if (other) {
@@ -251,13 +259,36 @@ export function buildConnection(input: StageBundle, scores: Scores): string[] {
     } else if (!a.answer_found) {
       lines.push(`An AI browsing agent looking for "${q}" on the live page could not find an answer${a.missing_information.length ? `; it reported missing: ${a.missing_information.slice(0, 3).join("; ")}` : ""}.`);
     } else if (answeredOnOtherPage(a) && !loc.verified) {
+      // Only a page text that was read can show the answer is missing from this page (2026-10-14).
       lines.push(
-        `An AI browsing agent found an answer to "${q}" only on another page it opened (${a.interactions_needed.join(", then ") || "a linked page"}). This page itself does not contain it, so answer engines would cite the other page.`,
+        `An AI browsing agent found an answer to "${q}" only on another page it opened (${a.interactions_needed.join(", then ") || "a linked page"}). ` +
+          (comparedTexts(loc).length
+            ? "This page itself does not contain it, so answer engines would cite the other page."
+            : "Fetch and the browser could not read this page, so whether it also holds the answer could not be checked."),
       );
     } else if (a.evidence_quote && !loc.verified && a.answer_location === "after_interaction") {
-      lines.push(`An AI browsing agent answered "${q}" only after interacting with the page (${a.interactions_needed.join(", then ") || "clicks"}); that text is not in what fetch tools or non-JavaScript crawlers receive.`);
+      const missedBy = [loc.inFetch === false ? "fetch tools" : null, loc.inRaw === false ? "non-JavaScript crawlers" : null].filter(Boolean);
+      lines.push(
+        `An AI browsing agent answered "${q}" only after interacting with the page (${a.interactions_needed.join(", then ") || "clicks"}); ` +
+          (missedBy.length
+            ? `that text is not in what ${missedBy.join(" or ")} receive.`
+            : "Fetch and the browser could not read the page, so whether crawlers receive that text could not be checked."),
+      );
     } else if (a.evidence_quote && !loc.verified) {
-      lines.push(`An AI browsing agent answered "${q}" (${where}). Its quote was paraphrased rather than copied from the page, so which crawlers receive that text could not be checked.`);
+      // "Paraphrased" is only a fair conclusion when the browser read the page, since the rendered page
+      // holds everything a reader sees. Medium (2026-10-14): Fetch was blocked and the Browser failed,
+      // yet the summary said the quote was paraphrased; there was no page text to compare it with.
+      const browserRead = loc.inRaw !== null || loc.inRendered !== null;
+      if (browserRead) {
+        lines.push(`An AI browsing agent answered "${q}" (${where}). Its quote was paraphrased rather than copied from the page, so which crawlers receive that text could not be checked.`);
+      } else if (loc.inFetch !== null) {
+        const why = input.browser?.challenge ? "the browser got a bot challenge page" : input.browser ? "the Browser stage failed" : "the Browser stage did not run";
+        lines.push(
+          `An AI browsing agent answered "${q}" (${where}). Its quote is not in the text Fetch extracted, and ${why}, so the quote may be paraphrased or come from page text Fetch did not keep; which crawlers receive it could not be checked.`,
+        );
+      } else {
+        lines.push(`An AI browsing agent answered "${q}" (${where}). Neither Fetch nor the browser could read the page, so its quote could not be checked against the page text or against what crawlers receive.`);
+      }
     } else if (a.evidence_quote) {
       // The server HTML is what crawlers that skip JavaScript receive, unless the edge answered the AI
       // crawler user-agents with a block page; then they receive that instead (Medium, 2026-10-13).

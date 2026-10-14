@@ -1618,6 +1618,19 @@ export function locateQuote(b: StageBundle): { inFetch: boolean | null; inRaw: b
   return { inFetch, inRaw, inRendered, verified: !!(inFetch || inRaw || inRendered) };
 }
 
+/**
+ * The page texts the agent's quote was compared with, for "not in ..." claims. A text that could not be
+ * read (Fetch blocked, Browser failed or challenged) was not compared, so no claim names it.
+ * Mock run, 2026-10-14: with Fetch and Browser both failing, a finding still said the answer was "not in
+ * the TinyFish Fetch extraction, the raw server HTML or the page as first loaded".
+ */
+export function comparedTexts(loc: { inFetch: boolean | null; inRaw: boolean | null; inRendered: boolean | null }, names = { fetch: "the TinyFish Fetch extraction", raw: "the raw server HTML", rendered: "the page as first loaded" }): string[] {
+  return [loc.inFetch !== null ? names.fetch : null, loc.inRaw !== null ? names.raw : null, loc.inRendered !== null ? names.rendered : null].filter((x): x is string => !!x);
+}
+
+/** "a, b or c" */
+const orList = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} or ${xs[xs.length - 1]}` : xs[0] ?? "");
+
 /* Several agent runs on the same page and question (AgentStageResult.runs) */
 
 const withAnswer = (b: StageBundle, a: AgentAnswer | null): StageBundle => (b.agent ? { ...b, agent: { ...b.agent, answer: a } } : b);
@@ -1695,7 +1708,24 @@ export function agentAgreement(b: StageBundle): { same: number; finished: number
   if (!b.agent || !runs || runs.length < 2) return null;
   const shown = runOutcome(b, b.agent.ok ? b.agent.answer : null);
   const outcomes = runs.map((r) => runOutcome(b, runAnswer(r)));
-  return { same: outcomes.filter((o) => o === shown).length, finished: outcomes.filter((o) => o !== "no_result").length, total: runs.length };
+  const finished = outcomes.filter((o) => o !== "no_result").length;
+  // No run finished: there is nothing to agree on (the demo index said "no result (3/3 runs)").
+  if (!finished) return null;
+  return { same: outcomes.filter((o) => o === shown).length, finished, total: runs.length };
+}
+
+/**
+ * The runs in a few words, for the demo index: "3/3 runs", "2/3 runs; 1 did not finish", "2/3 runs; 1 differed".
+ * "2/3 runs" alone meant both a timed-out run (Medium) and a run that got another result (tinyfish.ai).
+ * Null for a single run, or when no run finished.
+ */
+export function agentRunsShort(b: StageBundle): string | null {
+  const g = agentAgreement(b);
+  if (!g) return null;
+  const parts = [`${g.same}/${g.total} runs`];
+  if (g.finished < g.total) parts.push(`${g.total - g.finished} did not finish`);
+  if (g.same < g.finished) parts.push(`${g.finished - g.same} differed`);
+  return parts.join("; ");
 }
 
 /** The agent stage of a saved report as a bundle, for agentAgreement and friends. */
@@ -1810,6 +1840,7 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
   if (!a) return;
   const blocked = agentWasBlocked(a);
   const { inFetch, inRaw, inRendered, verified } = locateQuote(b);
+  const compared = comparedTexts({ inFetch, inRaw, inRendered });
 
   if (!a.answer_found && blocked) {
     // The agent never saw the content: "add this information" advice would be wrong.
@@ -1854,7 +1885,9 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
       evidence: [
         `Agent's steps: ${a.interactions_needed.join(" > ") || "opened a linked page"}`,
         a.evidence_quote ? `Agent's evidence (from the other page): "${truncate(a.evidence_quote, 200)}"` : "",
-        "The quote is not in this page's Fetch extraction, raw HTML or rendered page.",
+        compared.length
+          ? `The quote is not in this page's ${orList(comparedTexts({ inFetch, inRaw, inRendered }, { fetch: "Fetch extraction", raw: "raw HTML", rendered: "rendered page" }))}.`
+          : "Fetch and the browser could not read this page, so the quote could not be checked against it.",
       ].filter(Boolean),
       visibilityImpact:
         "Search and AI answer tools retrieve and quote one page at a time. For this query they need the page that holds the answer, so this page is unlikely to be the one cited.",
@@ -1868,19 +1901,21 @@ function answerabilityChecks(b: StageBundle, out: Finding[]) {
       },
       sources: ["agent", "fetch", "browser"],
     });
-  } else if (a.evidence_quote && !verified && a.answer_location === "after_interaction") {
+  } else if (a.evidence_quote && !verified && a.answer_location === "after_interaction" && compared.length) {
     // Content revealed by a click is expected to be missing from the page as loaded. Report it, but
-    // with low confidence: the agent may also have paraphrased.
+    // with low confidence: the agent may also have paraphrased. Without any page text to compare,
+    // "crawlers never receive it" would be a guess, so the finding needs at least one text.
     out.push({
       id: "answer-hidden",
       category: "answerability",
       severity: "medium",
       confidence: "low",
-      title: "The answer appears only after a click, and crawlers never receive it",
+      // The raw server HTML is what crawlers receive; without it, only the Fetch side was checked.
+      title: inRaw !== null ? "The answer appears only after a click, and crawlers never receive it" : "The answer appears only after a click, and AI fetch tools do not receive it",
       evidence: [
         `Agent's evidence: "${truncate(a.evidence_quote, 240)}"`,
         `Where the agent found it: after interaction${a.interactions_needed.length ? `; steps the agent took: ${a.interactions_needed.join(" > ")}` : ""}`,
-        "The text is not in the TinyFish Fetch extraction, the raw server HTML or the page as first loaded. That is expected for content loaded on click; if the agent paraphrased, this can be a false alarm.",
+        `The text is not in ${orList(compared)}${compared.length < 3 ? " (the only page text the audit could read)" : ""}. That is expected for content loaded on click; if the agent paraphrased, this can be a false alarm.`,
       ],
       visibilityImpact: "Only a browsing agent that clicks can reach this answer. Search crawlers and fetch tools quote what is in the HTML they receive.",
       fix: {

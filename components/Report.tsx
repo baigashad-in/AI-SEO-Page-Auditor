@@ -180,18 +180,26 @@ export default function Report({ report: r }: { report: AuditReport }) {
         <div>
           <dt>AI readability</dt>
           <dd>
-            {s.readability}
-            <small>/100</small>
+            {notes.readabilityMeasured ? (
+              <>
+                {s.readability}
+                <small>/100</small>
+              </>
+            ) : (
+              <small>not measured</small>
+            )}
           </dd>
           {notes.readability && <div className="breakdown">{capitalize(notes.readability)}</div>}
-          <details className="breakdown">
-            <summary>Breakdown</summary>
-            {s.readabilityParts.map((p) => (
-              <div key={p.label}>
-                {p.label}: {p.score}/{p.max}
-              </div>
-            ))}
-          </details>
+          {notes.readabilityMeasured && (
+            <details className="breakdown">
+              <summary>Breakdown</summary>
+              {s.readabilityParts.map((p) => (
+                <div key={p.label}>
+                  {p.label}: {p.score}/{p.max}
+                </div>
+              ))}
+            </details>
+          )}
         </div>
         <div>
           <dt>Search visibility</dt>

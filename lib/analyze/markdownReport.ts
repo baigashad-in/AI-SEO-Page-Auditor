@@ -2,7 +2,7 @@
 
 import type { AuditReport, Finding } from "../types";
 import { oneLineError, withoutCallerInstructions } from "../url";
-import { scoreNotes } from "./scoreNotes";
+import { readabilityText, scoreNotes } from "./scoreNotes";
 
 /** Text safe inside a Markdown table cell: one line, no column separators. */
 function cell(s: string): string {
@@ -76,7 +76,7 @@ export function reportToMarkdown(r: AuditReport): string {
     "",
     "## Scores",
     "",
-    `* AI readability: **${s.readability}/100**${notes.readability ? ` (${notes.readability})` : ""}`,
+    `* AI readability: **${readabilityText(s)}**${notes.readability ? ` (${notes.readability})` : ""}`,
     `* Search visibility: **${s.visibility === null ? "not measured" : `${s.visibility}/100`}**`,
     `* Answerability (AI agent): **${s.answerability.replace(/_/g, " ")}**${notes.answerability ? ` (${notes.answerability})` : ""}`,
     "",

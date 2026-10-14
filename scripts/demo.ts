@@ -10,7 +10,7 @@ import { runFullAudit } from "../lib/orchestrate";
 import { stampForFile } from "../lib/url";
 import { scoreNotes } from "../lib/analyze/scoreNotes";
 import { checkReport } from "../lib/analyze/consistency";
-import { agentAgreement, reportBundle } from "../lib/analyze/findings";
+import { agentRunsShort, reportBundle } from "../lib/analyze/findings";
 import { saveReport } from "./save";
 
 loadEnv();
@@ -43,9 +43,9 @@ async function main() {
         partial.push(why || `${r.scores.missingStages.join(", ")} gave no data`);
         console.log(`  Warning: this report is partial. ${why || ""}`.trimEnd());
       }
-      const agreed = agentAgreement(reportBundle(r));
+      const runs = agentRunsShort(reportBundle(r));
       rows.push(
-        `| [${p.url}](${basename(saved.md)}) | ${r.query} | ${r.scores.readability}${notes.readability ? " (partial)" : ""} | ${r.scores.visibility ?? "n/a"} | ${notes.answerability ? "no result" : r.scores.answerability.replace(/_/g, " ")}${agreed ? ` (${agreed.same}/${agreed.total} runs)` : ""} | ${r.views.rawWords ?? "n/a"} / ${r.views.renderedWords ?? "n/a"} / ${r.views.extractedWords ?? "n/a"} | ${top ? `${top.severity}: ${top.title.replace(/\|/g, "/")}` : "none"} | ${Math.round((Date.now() - started) / 1000)}s |`,
+        `| [${p.url}](${basename(saved.md)}) | ${r.query} | ${notes.readabilityMeasured ? `${r.scores.readability}${notes.readability ? " (partial)" : ""}` : "not measured"} | ${r.scores.visibility ?? "n/a"} | ${notes.answerability ? "no result" : r.scores.answerability.replace(/_/g, " ")}${runs ? ` (${runs})` : ""} | ${r.views.rawWords ?? "n/a"} / ${r.views.renderedWords ?? "n/a"} / ${r.views.extractedWords ?? "n/a"} | ${top ? `${top.severity}: ${top.title.replace(/\|/g, "/")}` : "none"} | ${Math.round((Date.now() - started) / 1000)}s |`,
       );
     } catch (err) {
       rows.push(`| ${p.url} | ${p.query ?? ""} | error | | | | ${(err as Error).message.replace(/\|/g, "/")} | |`);
