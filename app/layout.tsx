@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "What AI Sees: page auditor",
+  title: "AI SEO Page Auditor: what AI sees on your page",
   description:
     "Audit whether AI search and fetch tools can read a page, how it shows up in search, and what to fix first. Built on TinyFish Search, Fetch, Browser and Agent.",
 };

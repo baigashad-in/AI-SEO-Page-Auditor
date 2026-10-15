@@ -74,6 +74,18 @@ a {
   line-height: 1.1;
   letter-spacing: -0.01em;
   margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+/* 48px matches the title's line height, so the logo does not make the masthead taller. */
+.masthead .logo {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 11px;
+  /* keeps the dark tile visible on the dark theme's background */
+  box-shadow: 0 0 0 1px var(--rule);
 }
 .masthead p {
   margin: 0;
@@ -582,6 +594,11 @@ blockquote.quote {
   }
   .masthead h1 {
     font-size: 2rem;
+    gap: 10px;
+  }
+  .masthead .logo {
+    width: 36px;
+    height: 36px;
   }
   .row,
   .samples {

@@ -1,12 +1,12 @@
-# AI Page Auditor (What AI Sees)
+<img src="app/icon.svg" alt="AI SEO Page Auditor logo" width="64">
 
-**Live:** _TODO: add the deployed URL_
+# AI SEO Page Auditor (What AI Sees)
 
-Paste a URL and an optional target query. The app shows what search engines and AI tools can actually read on that page, where it shows up for the query, and a ranked list of fixes a site owner can apply the same day. TinyFish **Fetch** reads the page the way AI fetch tools do, **Browser** compares the raw server HTML with the rendered page, **Search** checks rank and indexing, and **Agent** tries to answer the query on the live page.
+ The app shows what search engines and AI tools can actually read on that page, where it shows up for the query, and a ranked list of fixes a site owner can apply the same day. TinyFish **Fetch** reads the page the way AI fetch tools do, **Browser** compares the raw server HTML with the rendered page, **Search** checks rank and indexing, and **Agent** tries to answer the query on the live page.
 
 ## Demo
 
-**Demo video:** _TODO: add the recording link_
+**Demo video:** https://youtu.be/_HPmcFgIDMw
 
 ## The idea: one page, three readers
 
@@ -63,7 +63,7 @@ const run = await tfGetAgentRun(run_id); // poll GET /v1/runs/{id} until COMPLET
 Requirements: Node 20 or newer and a TinyFish API key from https://agent.tinyfish.ai/api-keys.
 
 ```bash
-cd ai-page-auditor
+cd ai-seo-page-auditor
 npm install
 cp .env.example .env.local
 npm run dev        # open http://localhost:3000

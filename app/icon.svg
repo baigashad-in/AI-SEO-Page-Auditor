@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AI SEO Page Auditor logo">
+  <rect width="64" height="64" rx="15" fill="#1b2433"/>
+  <g stroke-linecap="round" stroke-width="4.5">
+    <g stroke="#ffffff">
+      <line x1="16" y1="21" x2="31" y2="21"/><line x1="16" y1="32" x2="31" y2="32"/><line x1="16" y1="43" x2="27" y2="43"/>
+    </g>
+    <g stroke="#9fd6ec" stroke-dasharray="0.1 7.4">
+      <line x1="38.5" y1="21" x2="48" y2="21"/><line x1="38.5" y1="32" x2="48" y2="32"/><line x1="38.5" y1="43" x2="41" y2="43"/>
+    </g>
+  </g>
+</svg>

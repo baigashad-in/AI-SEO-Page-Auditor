@@ -5,6 +5,7 @@ import Report from "@/components/Report";
 import type { AuditReport } from "@/lib/types";
 import { runAuditInBrowser, type Progress, type StageName } from "@/lib/client/runAudit";
 import { parseInputUrl } from "@/lib/url";
+import { Logo } from "@/components/Logo";
 
 const STAGES: { key: StageName; name: string; what: string }[] = [
   { key: "fetch", name: "Fetch", what: "What an AI fetch tool extracts, plus robots.txt, llms.txt and sitemap" },
@@ -69,7 +70,10 @@ export default function Home() {
   return (
     <main className="page">
       <header className="masthead">
-        <h1>What AI sees on your page</h1>
+        <h1>
+          <Logo className="logo" />
+          <span>What AI sees on your page</span>
+        </h1>
         <p>
           Paste a page. See what search engines and AI tools can actually read on it, where it shows up for the query you care about, and what to fix
           first.
